@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexcarrier"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -31,7 +32,11 @@ func (e *CodexExecutor) executeCodexImageViaResponses(
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
-	body, err := buildCodexImageResponsesRequest(parsed, codexImageModel)
+	// The caller's image model is forwarded rather than the compiled-in default, so
+	// selecting gpt-image-2.5-* actually reaches upstream. Upstream currently ignores
+	// this field on the subscription channel, which is why the catalog descriptions
+	// say so; sending it anyway is what makes the ids work the moment that changes.
+	body, err := buildCodexImageResponsesRequest(parsed, codexImageToolModel(parsed), e.resolveCodexImageBaseModel())
 	if err != nil {
 		return nil, nil, statusErr{code: http.StatusBadRequest, msg: err.Error()}
 	}
@@ -95,7 +100,19 @@ func (e *CodexExecutor) executeCodexImageViaResponses(
 	return nil, nil, statusErr{code: http.StatusBadGateway, msg: "responses image request failed"}
 }
 
-func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string) ([]byte, error) {
+// codexImageToolModel resolves the image model to attach to the image_generation
+// tool, falling back to the compiled-in default when a caller omitted it.
+func codexImageToolModel(parsed *codexImageRequest) string {
+	if parsed == nil {
+		return codexImageModel
+	}
+	if model := strings.TrimSpace(parsed.Model); model != "" {
+		return model
+	}
+	return codexImageModel
+}
+
+func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string, baseModel string) ([]byte, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}
@@ -121,7 +138,10 @@ func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string
 	}
 
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", codexImageResponsesMainModel)
+	if strings.TrimSpace(baseModel) == "" {
+		baseModel = codexcarrier.Resolve()
+	}
+	req, _ = sjson.SetBytes(req, "model", strings.TrimSpace(baseModel))
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", buildCodexImageResponsesInputText(parsed, prompt))

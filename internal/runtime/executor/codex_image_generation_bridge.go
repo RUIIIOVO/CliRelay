@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexcarrier"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -16,9 +18,9 @@ const (
 	// Per-account opt-out switch, surfaced by the management API as
 	// codex_image_generation_bridge. Absent means enabled.
 	metadataKeyCodexImageGenerationBridge = "codex_image_generation_bridge"
-
-	codexHostedImageGenerateTool = `{"type":"image_generation","action":"generate","model":"` + codexImageModel + `"}`
-	codexHostedImageEditTool     = `{"type":"image_generation","action":"edit","model":"` + codexImageModel + `"}`
+	// Per-account image model for the injected tool, surfaced by the management
+	// API as codex_image_generation_model. Absent means the build default.
+	metadataKeyCodexImageGenerationModel = "codex_image_generation_model"
 
 	// Sub2API-style guidance: hosted image_generation is intentional for clients that
 	// cannot expose the local image_gen namespace (API-key custom providers).
@@ -26,22 +28,53 @@ const (
 	codexImageGenerationBridgeText   = codexImageGenerationBridgeMarker + "\nWhen the user asks for raster image generation or editing, use the OpenAI Responses native `image_generation` tool attached to this request. The local Codex client may not expose an `image_gen` namespace under custom/API-key providers; that does not mean image generation is unavailable. Do not claim the environment lacks image tooling solely because `image_gen` is absent, and do not ask the user to switch to CLI fallback as the primary fix.\n</cliproxy-codex-image-generation>"
 )
 
-var (
-	// Hosted image_generation tool payload.
-	//
-	// The field set mirrors the request that /v1/images/generations already sends to
-	// chatgpt.com/backend-api/codex/responses (see buildCodexImageResponsesRequest). A bare
-	// {"type":"image_generation"} is also invoked by the model, but it cannot express the edit
-	// action, and it leaves the image model up to whatever the backend defaults to — pinning
-	// both keeps the conversation path and the /v1/images endpoints on the same model.
-	imageGenToolJSON      = []byte(codexHostedImageGenerateTool)
-	imageGenToolArrayJSON = []byte(`[` + codexHostedImageGenerateTool + `]`)
+// codexHostedImageTool builds the hosted image_generation tool payload for one
+// account.
+//
+// The field set mirrors the request that /v1/images/generations already sends to
+// chatgpt.com/backend-api/codex/responses (see buildCodexImageResponsesRequest). A bare
+// {"type":"image_generation"} is also invoked by the model, but it cannot express the edit
+// action, and it leaves the image model up to whatever the backend defaults to — pinning
+// both keeps the conversation path and the /v1/images endpoints on the same model.
+//
+// The model is per account rather than compiled in: Codex serves several
+// gpt-image releases, and an operator comparing them had no way to move the
+// conversation path off the default without editing the binary.
+func codexHostedImageTool(action string, auth *cliproxyauth.Auth) []byte {
+	tool := []byte(`{"type":"image_generation","action":"","model":""}`)
+	tool, _ = sjson.SetBytes(tool, "action", action)
+	tool, _ = sjson.SetBytes(tool, "model", codexBridgeImageModel(auth))
+	return tool
+}
 
-	// Same tool in edit mode, used when the current turn carries input images so the model
-	// transforms what the user attached instead of generating an unrelated new picture.
-	imageEditToolJSON      = []byte(codexHostedImageEditTool)
-	imageEditToolArrayJSON = []byte(`[` + codexHostedImageEditTool + `]`)
-)
+func codexHostedImageToolArray(action string, auth *cliproxyauth.Auth) []byte {
+	array := []byte(`[]`)
+	array, _ = sjson.SetRawBytes(array, "0", codexHostedImageTool(action, auth))
+	return array
+}
+
+// codexBridgeImageModel resolves which image model the injected tool asks for.
+//
+// A pinned value is validated against the Codex image catalog before it is used.
+// The management API validates on write, but metadata also arrives from restored
+// credential files and hand-edited JSON, and an unknown model here would turn
+// every image turn on the account into an upstream 400 rather than falling back.
+func codexBridgeImageModel(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return codexImageModel
+	}
+	pinned, _ := auth.Metadata[metadataKeyCodexImageGenerationModel].(string)
+	pinned = strings.TrimSpace(pinned)
+	if pinned == "" {
+		return codexImageModel
+	}
+	for _, model := range registry.ListImageGenerationModelsForProvider(registry.ImageProviderCodex) {
+		if strings.EqualFold(model.ID, pinned) {
+			return model.ID
+		}
+	}
+	return codexImageModel
+}
 
 // maybeEnsureCodexImageGenerationTool prepares outbound /responses tools for image gen.
 //
@@ -53,6 +86,7 @@ var (
 //  3. When image intent is present and only hosted tool is available, force
 //     tool_choice=image_generation so the model cannot skip the tool and reply with text.
 func maybeEnsureCodexImageGenerationTool(body []byte, auth *cliproxyauth.Auth, baseModel string, headers http.Header) []byte {
+	body = repairCodexImageCarrierModel(body, baseModel)
 	if requestHasLocalImageGenTool(body) {
 		return stripHostedImageGenerationTools(body)
 	}
@@ -337,10 +371,14 @@ func ensureCodexImageGenerationTool(body []byte, baseModel string, auth *cliprox
 		return body
 	}
 
-	toolJSON, toolArrayJSON := imageGenToolJSON, imageGenToolArrayJSON
+	action := "generate"
 	if requestCarriesImageInput(body) {
-		toolJSON, toolArrayJSON = imageEditToolJSON, imageEditToolArrayJSON
+		// The edit action transforms what the user attached; generate would invent
+		// an unrelated picture and ignore it.
+		action = "edit"
 	}
+	toolJSON := codexHostedImageTool(action, auth)
+	toolArrayJSON := codexHostedImageToolArray(action, auth)
 
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
@@ -397,4 +435,42 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
+}
+
+// repairCodexImageCarrierModel replaces the carrier model on a bridged image request.
+//
+// A request for an image-only model (gpt-image-*) cannot be sent as-is: Codex has
+// no image endpoint on the OAuth path, so the translator rewrites it into a chat
+// completion with an image_generation tool and puts a chat model at the top level
+// to carry it. That carrier is a constant in internal/translator, which pull
+// requests may not modify, and the constant now names a model upstream retired —
+// every such request comes back "The '<model>' model is not supported when using
+// Codex with a ChatGPT account."
+//
+// Correcting it here reaches all four outbound paths (streaming, non-streaming and
+// both websocket variants) because they share this hook, and it keeps the fix on
+// the executor side of that boundary. baseModel is the client's requested model,
+// before translation, which is why it still reads gpt-image-* at this point.
+func repairCodexImageCarrierModel(body []byte, baseModel string) []byte {
+	if !isCodexImageOnlyModel(baseModel) {
+		return body
+	}
+	carrier := strings.TrimSpace(codexcarrier.Resolve())
+	if carrier == "" {
+		return body
+	}
+	if strings.TrimSpace(gjson.GetBytes(body, "model").String()) == carrier {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, "model", carrier)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// isCodexImageOnlyModel reports whether a client asked for an image model directly,
+// matching the prefix the translator uses to decide it must bridge the request.
+func isCodexImageOnlyModel(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-image-")
 }

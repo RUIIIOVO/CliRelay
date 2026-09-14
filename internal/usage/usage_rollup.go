@@ -75,10 +75,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_rollup_tenant_subject_day
   ON usage_rollup_buckets(tenant_id, bucket_kind, auth_subject_id, bucket_start);
 `
 	// Bump marker when rebuild semantics change so upgrades re-run once.
-	usageRollupBackfillMarker      = "usage_rollup_buckets_v4"
-	quotaMinuteCoverageStartMarker = "quota_minute_utc_coverage_start"
-	rollupMarkerPending            = "pending"
-	rollupMarkerDone               = "done"
+	usageRollupBackfillMarker = "usage_rollup_buckets_v4"
+	rollupMarkerPending       = "pending"
+	rollupMarkerDone          = "done"
 )
 
 type rollupEvent struct {
@@ -339,16 +338,7 @@ func runUsageRollupBackfillAtInitDB(db *sql.DB, loc *time.Location, finalMarker 
 			return err
 		}
 	}
-	nowTime := time.Now().UTC()
-	now := nowTime.Format(time.RFC3339Nano)
-	if _, err = tx.Exec(`
-		INSERT INTO usage_projection_markers (marker_key, marker_value, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(marker_key) DO NOTHING
-	`, quotaMinuteCoverageStartMarker, nowTime.Truncate(time.Minute).Format(time.RFC3339), now); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("usage: quota minute coverage marker: %w", err)
-	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err = tx.Exec(`
 		INSERT INTO usage_projection_markers (marker_key, marker_value, updated_at)
 		VALUES (?, ?, ?)
@@ -462,15 +452,6 @@ func projectUsageRollupTx(tx *sql.Tx, ev rollupEvent) error {
 			updated_at = excluded.updated_at
 	`
 
-	coverageStart := ev.At.UTC().Truncate(time.Minute).Format(time.RFC3339)
-	if _, err := tx.Exec(`
-		INSERT INTO usage_projection_markers (marker_key, marker_value, updated_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(marker_key) DO NOTHING
-	`, quotaMinuteCoverageStartMarker, coverageStart, now); err != nil {
-		return fmt.Errorf("usage: record quota minute coverage start: %w", err)
-	}
-
 	// Fixed order avoids Postgres deadlocks when concurrent writers UPSERT the same key.
 	for _, kind := range []string{rollupBucketMinute, rollupBucketQuotaMinuteUTC, rollupBucketHour, rollupBucketDay, rollupBucketLifetime} {
 		start := starts[kind]
@@ -511,10 +492,33 @@ func commitLogWithProjections(tx *sql.Tx, ev rollupEvent) error {
 			return fmt.Errorf("project shared auth subject usage: %w", err)
 		}
 	}
+	// 5h 窗口锚点只在实时落账时推进，不放进 projectUsageRollupTx：后者也服务
+	// 全量重建，重放历史事件会把锚点改写成过去的时刻。锚点是运行时状态，重建
+	// 消费桶时不应被回退。
+	if err := touchFiveHourWindowAnchorsTx(tx, ev); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// touchFiveHourWindowAnchorsTx 为本次消费涉及的 Key 与账号各自开窗。只有真正
+// 产生费用的请求才开窗：5h 是美元额度，让零成本请求提前开窗会白白吃掉窗口。
+func touchFiveHourWindowAnchorsTx(tx *sql.Tx, ev rollupEvent) error {
+	if ev.Cost <= 0 {
+		return nil
+	}
+	at := ev.At
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if err := touchFiveHourWindowAnchorTx(tx, ev.TenantID, periodResetSubjectAPIKey, ev.APIKeyID, at); err != nil {
+		return err
+	}
+	return touchFiveHourWindowAnchorTx(tx, ev.TenantID, periodResetSubjectEndUser, ev.EndUserID, at)
 }
 
 // cleanupExpiredUsageRollupBuckets prunes minute/hour/day buckets past retention.
@@ -550,24 +554,4 @@ func cleanupExpiredUsageRollupBuckets(db *sql.DB) (int64, error) {
 		deleted += n
 	}
 	return deleted, nil
-}
-
-func FiveHourQuotaProjectionReadyAt(now time.Time) bool {
-	db := getReadDB()
-	if db == nil {
-		return false
-	}
-	raw := strings.TrimSpace(projectionMarkerValue(db, quotaMinuteCoverageStartMarker))
-	if raw == "" {
-		return false
-	}
-	started, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return false
-	}
-	return !started.After(now.UTC().Truncate(time.Minute).Add(-5 * time.Hour))
-}
-
-func FiveHourQuotaProjectionReady() bool {
-	return FiveHourQuotaProjectionReadyAt(time.Now())
 }
