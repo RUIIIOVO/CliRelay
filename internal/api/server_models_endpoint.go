@@ -144,6 +144,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			}
 		}
 
+		// Models switched off in the catalog leave the listing for every caller,
+		// not just the scoped ones — the scope filter above is conditional, and an
+		// operator disabling a model means it is gone regardless of who asks.
+		resp.Data = dropDisabledCatalogModels(tenantID, resp.Data)
+
 		// Attach tenant catalog metadata so public clients (apikey-lookup plaza)
 		// can show description + pricing without management credentials.
 		enrichOpenAIModelsWithCatalog(tenantID, resp.Data)
@@ -160,6 +165,27 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		recorder.ResponseWriter.WriteHeader(http.StatusOK)
 		_, _ = recorder.ResponseWriter.Write(filteredJSON)
 	}
+}
+
+// dropDisabledCatalogModels removes models the operator switched off in the
+// model catalog from a client-facing listing.
+func dropDisabledCatalogModels(tenantID string, models []map[string]interface{}) []map[string]interface{} {
+	if len(models) == 0 {
+		return models
+	}
+	disabled := modelconfigsettings.DisabledModelIDsForTenant(tenantID)
+	if len(disabled) == 0 {
+		return models
+	}
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		if _, off := disabled[modelconfigsettings.NormalizeModelKey(id)]; off {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
 
 // enrichOpenAIModelsWithCatalog fills description/pricing/modalities from the

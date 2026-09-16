@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
+	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
@@ -54,7 +55,11 @@ func (s *Server) modelRestrictionMiddleware() gin.HandlerFunc {
 
 		tenantID := requestTenantID(c)
 		hasScopedRestriction := s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedGroups)
-		if allowedStr == "" && !hasScopedRestriction && ccSwitchAllowed == nil {
+		// A model switched off in the catalog is refused for everyone, so this
+		// middleware has to inspect the body even when the key itself carries no
+		// allowed-models restriction.
+		disabledModels := modelconfigsettings.DisabledModelIDsForTenant(tenantID)
+		if allowedStr == "" && !hasScopedRestriction && ccSwitchAllowed == nil && len(disabledModels) == 0 {
 			c.Next()
 			return
 		}
@@ -104,6 +109,13 @@ func (s *Server) modelRestrictionMiddleware() gin.HandlerFunc {
 		requestedModel := strings.TrimSpace(bodyObj.Model)
 		routingModel := mapCcSwitchRequestModelForRestriction(requestedModel, route)
 
+		// Check the model actually routed to as well, so a CC Switch mapping cannot
+		// reach a disabled target through an enabled request alias.
+		if modelIsDisabled(requestedModel, disabledModels) || modelIsDisabled(routingModel, disabledModels) {
+			abortModelDisabled(c, requestedModel)
+			return
+		}
+
 		if len(allowedModels) > 0 && !modelInSet(requestedModel, allowedModels) && !modelInSet(routingModel, allowedModels) {
 			abortModelNotAllowed(c, requestedModel)
 			return
@@ -125,6 +137,41 @@ func abortModelNotAllowed(c *gin.Context, model string) {
 			"code":    "model_not_allowed",
 		},
 	})
+}
+
+// abortModelDisabled rejects a model the operator switched off in the catalog.
+//
+// This is not an authorization failure — the key may well be allowed to use it —
+// so it reports the model as absent rather than forbidden, matching what the
+// listing endpoints now say about it.
+func abortModelDisabled(c *gin.Context, model string) {
+	c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+		"error": map[string]interface{}{
+			"message": fmt.Sprintf("model '%s' is disabled", model),
+			"type":    "not_found",
+			"code":    "model_not_found",
+		},
+	})
+}
+
+func modelIsDisabled(model string, disabled map[string]struct{}) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	key := modelconfigsettings.NormalizeModelKey(model)
+	if key == "" {
+		return false
+	}
+	if _, off := disabled[key]; off {
+		return true
+	}
+	// Prefixed aliases ("ollama/gpt-oss:20b") route to the bare model ID.
+	if idx := strings.Index(key, "/"); idx >= 0 {
+		if _, off := disabled[strings.TrimSpace(key[idx+1:])]; off {
+			return true
+		}
+	}
+	return false
 }
 
 func modelInSet(model string, allowed map[string]struct{}) bool {
