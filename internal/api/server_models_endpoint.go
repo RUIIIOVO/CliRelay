@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/modelcatalog"
 	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -146,6 +147,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// Attach tenant catalog metadata so public clients (apikey-lookup plaza)
 		// can show description + pricing without management credentials.
 		enrichOpenAIModelsWithCatalog(tenantID, resp.Data)
+		enrichOpenAIModelsWithStaticCapabilities(resp.Data)
 
 		filteredJSON, err := json.Marshal(resp)
 		if err != nil {
@@ -225,6 +227,125 @@ func enrichOpenAIModelsWithCatalog(tenantID string, models []map[string]interfac
 				"price_per_call":                pricing.PricePerCall,
 			}
 		}
+	}
+}
+
+// enrichOpenAIModelsWithStaticCapabilities publishes the capability metadata the
+// static registry already knows about (context window, completion cap, reasoning
+// efforts, modalities) on the OpenAI-compatible /v1/models payload.
+//
+// Clients that build their model catalog from this endpoint (Codex CLI, the pi
+// CLIProxyAPI provider, ...) otherwise have to fall back to conservative
+// defaults such as a 128k context window and no reasoning support.
+// Existing keys are never overwritten.
+func enrichOpenAIModelsWithStaticCapabilities(models []map[string]interface{}) {
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id, _ := model["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		info := registry.LookupStaticModelInfo(id)
+		if info == nil {
+			if resolved := registry.LookupModelInfo(id); resolved != nil {
+				info = resolved
+			}
+		}
+		if info == nil {
+			continue
+		}
+
+		contextWindow := info.ContextLength
+		if contextWindow <= 0 {
+			contextWindow = info.InputTokenLimit
+		}
+		if contextWindow > 0 {
+			if _, exists := model["context_window"]; !exists {
+				model["context_window"] = contextWindow
+			}
+			if _, exists := model["max_context_window"]; !exists {
+				model["max_context_window"] = contextWindow
+			}
+		}
+
+		maxCompletion := info.MaxCompletionTokens
+		if maxCompletion <= 0 {
+			maxCompletion = info.OutputTokenLimit
+		}
+		if maxCompletion > 0 {
+			if _, exists := model["max_completion_tokens"]; !exists {
+				model["max_completion_tokens"] = maxCompletion
+			}
+			if _, exists := model["max_output_tokens"]; !exists {
+				model["max_output_tokens"] = maxCompletion
+			}
+		}
+
+		if displayName := strings.TrimSpace(info.DisplayName); displayName != "" {
+			if existing, _ := model["display_name"].(string); strings.TrimSpace(existing) == "" {
+				model["display_name"] = displayName
+			}
+		}
+
+		if levels := staticReasoningLevels(info); len(levels) > 0 {
+			if _, exists := model["supported_reasoning_levels"]; !exists {
+				model["supported_reasoning_levels"] = levels
+			}
+		}
+
+		if _, exists := model["input_modalities"]; !exists {
+			modalities := []string{"text"}
+			if supportsVision, ok := model["supports_vision"].(bool); ok && supportsVision {
+				modalities = append(modalities, "image")
+			} else if staticSupportsVision(info) {
+				modalities = append(modalities, "image")
+				model["supports_vision"] = true
+			}
+			model["input_modalities"] = modalities
+		}
+	}
+}
+
+// staticReasoningLevels maps the registry thinking capability onto the discrete
+// effort vocabulary that OpenAI-responses style clients expect.
+func staticReasoningLevels(info *registry.ModelInfo) []string {
+	if info == nil || info.Thinking == nil {
+		return nil
+	}
+	thinking := info.Thinking
+	levels := make([]string, 0, 6)
+	if thinking.ZeroAllowed {
+		levels = append(levels, "none")
+	}
+	if len(thinking.Levels) > 0 {
+		for _, level := range thinking.Levels {
+			level = strings.ToLower(strings.TrimSpace(level))
+			if level == "" || level == "none" {
+				continue
+			}
+			levels = append(levels, level)
+		}
+		return levels
+	}
+	if thinking.Max <= 0 && !thinking.DynamicAllowed {
+		return nil
+	}
+	return append(levels, "low", "medium", "high")
+}
+
+// staticSupportsVision reports whether a statically known model accepts images.
+func staticSupportsVision(info *registry.ModelInfo) bool {
+	if info == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(info.Type)) {
+	case "claude", "bedrock", "gemini", "openai":
+		return true
+	default:
+		return false
 	}
 }
 

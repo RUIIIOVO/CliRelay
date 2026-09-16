@@ -26,6 +26,9 @@ type claudeToResponsesState struct {
 	FuncCallIDs map[int]string // index -> call id
 	// message text aggregation
 	TextBuf strings.Builder
+	// offset of the currently open text block inside TextBuf, so the
+	// *.done events can carry the text produced by that block
+	TextBlockStart int
 	// reasoning state
 	ReasoningActive    bool
 	ReasoningItemID    string
@@ -79,6 +82,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.CreatedAt = time.Now().Unix()
 			// Reset per-message aggregation state
 			st.TextBuf.Reset()
+			st.TextBlockStart = 0
 			st.ReasoningBuf.Reset()
 			st.ReasoningActive = false
 			st.InTextBlock = false
@@ -127,6 +131,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if typ == "text" {
 			// open message item + content part
 			st.InTextBlock = true
+			st.TextBlockStart = st.TextBuf.Len()
 			st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
 			item := `{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`
 			item, _ = sjson.Set(item, "sequence_number", nextSeq())
@@ -219,17 +224,27 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 	case "content_block_stop":
 		idx := int(root.Get("index").Int())
 		if st.InTextBlock {
+			// Text produced by the block that is closing. Clients (Codex CLI, pi)
+			// treat these *.done payloads as authoritative and overwrite whatever
+			// they accumulated from the deltas, so they must carry the real text.
+			blockText := st.TextBuf.String()
+			if st.TextBlockStart >= 0 && st.TextBlockStart <= len(blockText) {
+				blockText = blockText[st.TextBlockStart:]
+			}
 			done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
 			done, _ = sjson.Set(done, "sequence_number", nextSeq())
 			done, _ = sjson.Set(done, "item_id", st.CurrentMsgID)
+			done, _ = sjson.Set(done, "text", blockText)
 			out = append(out, emitEvent("response.output_text.done", done))
 			partDone := `{"type":"response.content_part.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""}}`
 			partDone, _ = sjson.Set(partDone, "sequence_number", nextSeq())
 			partDone, _ = sjson.Set(partDone, "item_id", st.CurrentMsgID)
+			partDone, _ = sjson.Set(partDone, "part.text", blockText)
 			out = append(out, emitEvent("response.content_part.done", partDone))
 			final := `{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"completed","content":[{"type":"output_text","text":""}],"role":"assistant"}}`
 			final, _ = sjson.Set(final, "sequence_number", nextSeq())
 			final, _ = sjson.Set(final, "item.id", st.CurrentMsgID)
+			final, _ = sjson.Set(final, "item.content.0.text", blockText)
 			out = append(out, emitEvent("response.output_item.done", final))
 			st.InTextBlock = false
 		} else if st.InFuncBlock {

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/andybalholm/brotli"
@@ -237,7 +239,18 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", hdrDefault(hd.UserAgent, config.BuildClaudeFingerprintUserAgent(config.DefaultClaudeFingerprintCLIVersion, config.DefaultClaudeFingerprintEntrypoint)))
+	// Anthropic gates newer models (e.g. claude-fable-5-1) on the reported
+	// Claude Code version and on the canonical
+	// "claude-cli/<version> (external, <entrypoint>)" User-Agent shape. A
+	// client that sends its own agent (curl, a bare "claude-cli/x.y.z"
+	// without the suffix, or an outdated version) would otherwise be
+	// forwarded verbatim and rejected with claude_code_version_too_old.
+	// Forward a client agent only when it already satisfies the gate.
+	canonicalUA := hdrDefault(hd.UserAgent, config.BuildClaudeFingerprintUserAgent(config.DefaultClaudeFingerprintCLIVersion, config.DefaultClaudeFingerprintEntrypoint))
+	if ua := strings.TrimSpace(ginHeaders.Get("User-Agent")); claudeUserAgentMeetsGate(ua) {
+		canonicalUA = ua
+	}
+	r.Header.Set("User-Agent", canonicalUA)
 	r.Header.Set("Connection", "keep-alive")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
@@ -262,4 +275,45 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+// claudeGateUARe matches the canonical Claude Code User-Agent shape that
+// Anthropic parses for its minimum-version model gate.
+var claudeGateUARe = regexp.MustCompile(`(?i)^claude-cli/([0-9]+(?:\.[0-9]+){0,3})\s+\(external,\s*[^)]+\)`)
+
+// claudeUserAgentMeetsGate reports whether a client-supplied User-Agent is a
+// well-formed Claude Code agent at or above the configured minimum version.
+func claudeUserAgentMeetsGate(ua string) bool {
+	m := claudeGateUARe.FindStringSubmatch(strings.TrimSpace(ua))
+	if m == nil {
+		return false
+	}
+	return compareClaudeVersions(m[1], config.DefaultClaudeFingerprintCLIVersion) >= 0
+}
+
+// compareClaudeVersions compares dotted numeric versions, treating missing
+// components as zero. Returns -1, 0 or 1.
+func compareClaudeVersions(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var av, bv int
+		if i < len(as) {
+			av, _ = strconv.Atoi(strings.TrimSpace(as[i]))
+		}
+		if i < len(bs) {
+			bv, _ = strconv.Atoi(strings.TrimSpace(bs[i]))
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
