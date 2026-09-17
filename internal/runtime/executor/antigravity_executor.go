@@ -221,14 +221,19 @@ attemptLoop:
 				// attempt on an account that's already known to be limited,
 				// leaving the outer selector fewer retries to reach a
 				// different, healthy account.
-				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) {
+				//
+				// The location gate is the opposite: it is a per-attempt draw
+				// (antigravityShouldRetryHost), so the next host and the next
+				// attempt are both worth taking before failing the client.
+				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, bodyBytes) ||
+					antigravityShouldRetryHost(httpResp.StatusCode, bodyBytes) {
 					if idx+1 < len(baseURLs) {
-						log.Debugf("antigravity executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						log.Debugf("antigravity executor: retryable upstream status %d on base url %s, retrying with fallback base url: %s", httpResp.StatusCode, baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
 						delay := antigravityNoCapacityRetryDelay(attempt)
-						log.Debugf("antigravity executor: no capacity for model %s, retrying in %s (attempt %d/%d)", execCtx.BaseModel, delay, attempt+1, attempts)
+						log.Debugf("antigravity executor: retryable upstream status %d for model %s, retrying in %s (attempt %d/%d)", httpResp.StatusCode, execCtx.BaseModel, delay, attempt+1, attempts)
 						if errWait := antigravityWait(ctx, delay); errWait != nil {
 							return nil, errWait
 						}

@@ -172,6 +172,104 @@ func TestUnifiedModelsHandlerKeepsSystemTenantRegistryBehavior(t *testing.T) {
 	}
 }
 
+func TestUnifiedModelsHandlerPiCatalogHidesStaticOnlyModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		systemAuthID = "models-pi-catalog-codex-auth"
+		liveModel    = "claude-live-discovery"
+		staticOnly   = "claude-4-legacy-static"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(systemAuthID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(systemAuthID) })
+	modelRegistry.RegisterClient(systemAuthID, "codex", []*registry.ModelInfo{
+		{ID: liveModel, Object: "model", OwnedBy: "anthropic"},
+		{ID: staticOnly, Object: "model", OwnedBy: "anthropic"},
+	})
+	// Live discovery only knows the current model; staticOnly is the stale
+	// registry row the management plaza already hides.
+	managementauthfiles.StoreDiscoveryCacheForTest(identity.SystemTenantID, "codex", []*registry.ModelInfo{
+		{ID: liveModel, Object: "model", OwnedBy: "anthropic"},
+	})
+
+	authManager := coreauth.NewManager(nil, nil, nil)
+	authManager.SetConfigForTenant(identity.SystemTenantID, &config.Config{})
+	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
+		ID: systemAuthID, TenantID: identity.SystemTenantID, Provider: "codex", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register system auth: %v", err)
+	}
+
+	cfg := &config.Config{}
+	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
+	server := &Server{handlers: base, cfg: cfg}
+	router := gin.New()
+	router.GET("/v1/models", func(c *gin.Context) {
+		c.Set("tenantID", identity.SystemTenantID)
+		server.unifiedModelsHandler(
+			openai.NewOpenAIAPIHandler(base),
+			claude.NewClaudeCodeAPIHandler(base),
+		)(c)
+	})
+
+	requestIDs := func(target string) []string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body=%s", target, rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("unmarshal GET %s response: %v", target, err)
+		}
+		return modelIDs(response.Data)
+	}
+
+	// The pi provider builds its /model picker from this endpoint, so it must see
+	// the curated catalog rather than the raw static registry.
+	if ids := requestIDs("/v1/models?client_version=pi"); !sameStringSet(ids, []string{liveModel}) {
+		t.Fatalf("pi catalog = %#v, want only %q", ids, liveModel)
+	}
+
+	// Every other caller keeps the previous system-tenant behaviour.
+	if ids := requestIDs("/v1/models"); !containsString(ids, liveModel) || !containsString(ids, staticOnly) {
+		t.Fatalf("system tenant models = %#v, want both registry models", ids)
+	}
+}
+
+func TestPiCatalogRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		target string
+		want   bool
+	}{
+		{"/v1/models?client_version=pi", true},
+		{"/v1/models?client_version=PI", true},
+		{"/v1/models?client_version=%20pi%20", true},
+		{"/v1/models", false},
+		{"/v1/models?client_version=0.180.0", false},
+		{"/v1/models?client_version=pid", false},
+	}
+	for _, testCase := range cases {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, testCase.target, nil)
+		if got := piCatalogRequest(ctx); got != testCase.want {
+			t.Errorf("piCatalogRequest(%q) = %v, want %v", testCase.target, got, testCase.want)
+		}
+	}
+	if piCatalogRequest(nil) {
+		t.Error("piCatalogRequest(nil) = true, want false")
+	}
+}
+
 func TestFilterCodexModelsForCcSwitchRouteReturnsRequestModels(t *testing.T) {
 	models := []map[string]interface{}{
 		{"id": "deepseek-chat", "object": "model", "owned_by": "deepseek"},

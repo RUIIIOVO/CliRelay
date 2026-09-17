@@ -75,15 +75,24 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// very setting being edited. Only the editor sets this flag; plaza and
 		// catalog keep enforcement.
 		ignoreGroupAllowedModels := queryFlagEnabled(c, "ignore_group_allowed_models", "ignore-group-allowed-models")
+		// The pi CLIProxyAPI provider registers every id this endpoint returns into
+		// pi's /model picker, so pi has to see the operator-curated catalog rather
+		// than the raw static registry — otherwise the stale Claude snapshot ids the
+		// management model plaza (and ccswitch) already hide reappear as usable pi
+		// models. pi asks with client_version=pi, the documented contract for this
+		// endpoint, and the catalog stays live: toggling a model in the panel changes
+		// what the next pi refresh registers, with no rebuild and no id list to
+		// maintain on the client.
+		piCatalogRequested := piCatalogRequest(c)
 		var portalVisibleModelIDs map[string]struct{}
-		if tenantScoped && s.handlers != nil {
+		if (tenantScoped || piCatalogRequested) && s.handlers != nil {
 			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
 				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw,
 					modelcatalog.AvailabilityFilterOptions{IgnoreGroupAllowedModels: ignoreGroupAllowedModels})
 		}
 		scopedRoutingRestricted := !ignoreGroupAllowedModels &&
 			s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
-		needsScopeFilter := tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
+		needsScopeFilter := portalVisibleModelIDs != nil || tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
 		recorder := &responseRecorder{
 			ResponseWriter: c.Writer,
@@ -186,6 +195,15 @@ func dropDisabledCatalogModels(tenantID string, models []map[string]interface{})
 		out = append(out, model)
 	}
 	return out
+}
+
+// piCatalogRequest reports whether the caller is the pi CLIProxyAPI provider, which
+// builds its model picker from GET {root}/v1/models?client_version=pi.
+func piCatalogRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Query("client_version")), "pi")
 }
 
 // enrichOpenAIModelsWithCatalog fills description/pricing/modalities from the

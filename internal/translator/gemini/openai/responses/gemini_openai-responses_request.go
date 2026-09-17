@@ -3,6 +3,7 @@ package responses
 import (
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -13,9 +14,8 @@ const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
-	// Note: modelName and stream parameters are part of the fixed method signature
-	_ = modelName // Unused but required by interface
-	_ = stream    // Unused but required by interface
+	// Note: stream is part of the fixed method signature.
+	_ = stream // Unused but required by interface
 
 	// Base Gemini API template (do not include thinkingConfig by default)
 	out := `{"contents":[]}`
@@ -329,10 +329,30 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				out, _ = sjson.SetRaw(out, "contents.-1", functionContent)
 
 			case "reasoning":
+				// A Gemini thinking part must carry a signature, and the Antigravity
+				// Claude models enforce that on the wire: replaying an unsigned thought
+				// part is rejected with
+				// `messages.N.content.M.thinking.signature: Field required`.
+				//
+				// Codex replays its own reasoning items with an empty
+				// `encrypted_content`, so the client-supplied value is usually useless.
+				// Fall back to the signature the response side cached for this exact
+				// thinking text (the same cache the Claude Code path uses) and drop the
+				// part when neither source has one — an absent thinking block is always
+				// accepted, an unsigned one never is.
+				thoughtText := item.Get("summary.0.text").String()
+				thoughtSignature := strings.TrimSpace(item.Get("encrypted_content").String())
+				if thoughtSignature == "" && modelName != "" {
+					thoughtSignature = cache.GetCachedSignature(modelName, thoughtText)
+				}
+				if thoughtSignature == "" {
+					break
+				}
+
 				thoughtContent := `{"role":"model","parts":[]}`
 				thought := `{"text":"","thoughtSignature":"","thought":true}`
-				thought, _ = sjson.Set(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.Set(thought, "thoughtSignature", item.Get("encrypted_content").String())
+				thought, _ = sjson.Set(thought, "text", thoughtText)
+				thought, _ = sjson.Set(thought, "thoughtSignature", thoughtSignature)
 
 				thoughtContent, _ = sjson.SetRaw(thoughtContent, "parts.-1", thought)
 				out, _ = sjson.SetRaw(out, "contents.-1", thoughtContent)

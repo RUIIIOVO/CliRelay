@@ -221,6 +221,25 @@ func antigravityShouldRetryNoCapacity(statusCode int, body []byte) bool {
 	return strings.Contains(msg, "no capacity available")
 }
 
+// antigravityShouldRetryHost reports whether an upstream response is a verdict on
+// this attempt rather than on the request itself.
+//
+// The daily hosts answer a share of otherwise-valid requests with
+// `400 FAILED_PRECONDITION: User location is not supported for the API use.`
+// Measured on the live deployment, calling Google directly with the account's own
+// token so the relay was out of the picture: 10 sequential requests produced 5-7
+// of those, split across both hosts, with the same project id that
+// `loadCodeAssist` reports, and the same host served the identical request
+// minutes later. The gate is a per-attempt draw, so it is worth another host and
+// another attempt — treating it as request-fatal (the previous behaviour) turned
+// it into a user-visible failure instead.
+func antigravityShouldRetryHost(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest || len(body) == 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(body)), "user location is not supported")
+}
+
 func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0
@@ -254,10 +273,15 @@ func antigravityBaseURLFallbackOrder(auth *cliproxyauth.Auth) []string {
 	// every 429 it returns costs a retry and risks being read as an exhausted
 	// quota. Production logs showed the daily host rate-limiting requests that
 	// the sandbox host then served without complaint.
+	//
+	// Production stays out on purpose: it answers every request for a free-tier
+	// account with `429 Resource has been exhausted` (6/6 measured), and a 429 is
+	// read as an account-level signal that trips the credential cool-down — which
+	// then fails the requests that follow. A host that only ever says "quota" can
+	// never serve the caller that just got gated.
 	return []string{
 		antigravitySandboxBaseURLDaily,
 		antigravityBaseURLDaily,
-		// antigravityBaseURLProd,
 	}
 }
 
