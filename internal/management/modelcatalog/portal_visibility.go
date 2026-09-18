@@ -15,7 +15,13 @@ const portalRootModelsPath = "/v1/models"
 // editor can see models that are not yet on a group's allow-list — otherwise the
 // list used to add a model is itself filtered by the setting being edited.
 func (s *Service) PortalVisibleModelIDs(allowedChannelsRaw, allowedGroupsRaw string, opts ...AvailabilityFilterOptions) map[string]struct{} {
-	configuredIDs := configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw, opts...))
+	// ConfiguredAvailability keeps disabled models so the management catalog can
+	// render their toggle; every surface that actually serves models has to take
+	// them back out.
+	configuredIDs := dropDisabledModelIDs(
+		configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw, opts...)),
+		s.tenantID,
+	)
 	rootPathIDs := rootModelsPathIDs(s.PathAvailability(opts...))
 	visible := make(map[string]struct{})
 	for id := range configuredIDs {

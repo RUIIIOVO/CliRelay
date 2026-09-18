@@ -1,9 +1,13 @@
 package modelcatalog
 
 import (
+	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // The management catalog is built from the static registry, which never looked
@@ -90,5 +94,85 @@ func TestDropDisabledModelsHandlesEmptyInput(t *testing.T) {
 
 	if got := dropDisabledModels(nil, ""); len(got) != 0 {
 		t.Fatalf("dropDisabledModels(nil) = %v, want empty", modelIDsOf(got))
+	}
+}
+
+func TestDropDisabledModelIDsRemovesDisabledEntries(t *testing.T) {
+	initModelCatalogTestDB(t)
+
+	seedEnablement(t, "claude-opus-4-6", false)
+	seedEnablement(t, "claude-opus-5", true)
+
+	ids := map[string]struct{}{"claude-opus-4-6": {}, "claude-opus-5": {}, "claude-fable-5-1": {}}
+	got := dropDisabledModelIDs(ids, "")
+
+	if _, present := got["claude-opus-4-6"]; present {
+		t.Fatal("disabled model survived the ID filter")
+	}
+	for _, want := range []string{"claude-opus-5", "claude-fable-5-1"} {
+		if _, present := got[want]; !present {
+			t.Fatalf("%q was dropped, want it kept", want)
+		}
+	}
+}
+
+// The management catalog page intersects the model_configs rows with configured
+// availability. Dropping a disabled model from availability therefore removed the
+// row carrying its toggle: the model disappeared from the page entirely and could
+// never be switched back on.
+func TestConfiguredAvailabilityKeepsDisabledModelsForTheOperator(t *testing.T) {
+	initModelCatalogTestDB(t)
+
+	const (
+		clientID     = "enablement-visibility-auth"
+		disabledID   = "enablement-visibility-disabled"
+		enabledModel = "enablement-visibility-enabled"
+	)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(clientID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
+		{ID: disabledID, Object: "model", OwnedBy: "openai"},
+		{ID: enabledModel, Object: "model", OwnedBy: "openai"},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: clientID, Provider: "codex", Label: "Codex", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	seedEnablement(t, disabledID, false)
+	seedEnablement(t, enabledModel, true)
+
+	service := New(&config.Config{}, manager)
+	data, ok := service.ConfiguredAvailability("", "")["data"].([]map[string]any)
+	if !ok {
+		t.Fatal("configured availability returned no data slice")
+	}
+
+	var found map[string]any
+	for _, item := range data {
+		if item["id"] == disabledID {
+			found = item
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("disabled model %q is missing from the operator catalog; ids=%v", disabledID, modelIDsOf(data))
+	}
+	if found["enabled"] != false {
+		t.Fatalf("disabled model entry enabled = %#v, want false", found["enabled"])
+	}
+
+	// ... while the surfaces that serve models still hide it.
+	visible := service.PortalVisibleModelIDs("", "")
+	if _, present := visible[disabledID]; present {
+		t.Fatal("disabled model is still portal-visible")
+	}
+	if _, present := visible[enabledModel]; !present {
+		t.Fatalf("enabled model %q lost its portal visibility", enabledModel)
 	}
 }

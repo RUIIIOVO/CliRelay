@@ -26,7 +26,7 @@
       },
       {
         "path": "internal/management/modelcatalog/availability.go",
-        "max_lines": 977
+        "max_lines": 964
       },
       {
         "path": "internal/management/settings/providers/provider_keys_extended.go",
