@@ -231,7 +231,10 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 		log.WithError(err).Error("enduser: backfill from api keys failed")
 		return fmt.Errorf("enduser backfill: %w", err)
 	} else if created > 0 {
-		log.Infof("enduser: backfilled %d end users from api keys", created)
+		// Say what the operator has to do next. These accounts are created
+		// without a usable password, so without this line the first symptom is
+		// a migrated user reporting that no password works.
+		log.Infof("enduser: backfilled %d end users from api keys; each account needs a password issued via the management password reset before its owner can sign in", created)
 	}
 	usage.MigrateAPIKeyPermissionProfilesFromYAML(configPath)
 	usage.MigrateRoutingConfigFromConfig(cfg, configPath)
