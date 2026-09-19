@@ -222,6 +222,19 @@ func sessionStickyKey(opts cliproxyexecutor.Options) string {
 	return bodySessionStickyKey(opts.OriginalRequest)
 }
 
+// SessionKeyFromRequestBody derives a stable session identity from an inbound
+// request body for clients that send no session header at all.
+//
+// Selection already falls back to this when the header is missing, which is why
+// such a client still keeps one conversation pinned to one auth. Executors need
+// the same value to build an upstream prompt cache key, and they must derive it
+// from this function rather than reimplementing the fallback: the two would
+// drift, and a cache key that disagrees with the sticky binding names a session
+// the selected account never saw.
+func SessionKeyFromRequestBody(body []byte) string {
+	return bodySessionStickyKey(body)
+}
+
 func bodySessionStickyKey(body []byte) string {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return ""
