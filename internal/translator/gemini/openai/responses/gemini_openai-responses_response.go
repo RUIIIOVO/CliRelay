@@ -34,6 +34,9 @@ type geminiToResponsesState struct {
 	ReasoningBuf    strings.Builder
 	ReasoningClosed bool
 
+	// generated image aggregation (keyed by output_index)
+	ImageItems map[int]geminiInlineImage
+
 	// function call aggregation (keyed by output_index)
 	NextIndex   int
 	FuncArgsBuf map[int]*strings.Builder
@@ -299,6 +302,16 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				return true
 			}
 
+			// Generated image
+			if image, ok := geminiInlineImageFromPart(part); ok {
+				// An image is its own output item, so anything still open has
+				// to be closed first.
+				finalizeReasoning()
+				finalizeMessage()
+				out = append(out, emitResponsesImageEvents(st, nextSeq, image)...)
+				return true
+			}
+
 			// Function call
 			if fc := part.Get("functionCall"); fc.Exists() {
 				// Before emitting function-call outputs, finalize reasoning and the message (if open).
@@ -512,6 +525,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				continue
 			}
 
+			if image, ok := st.ImageItems[idx]; ok {
+				item := responsesImageItemJSON(responsesImageItemID(st.ResponseID, idx), "completed", image, true)
+				outputsWrapper, _ = sjson.SetRaw(outputsWrapper, "arr.-1", item)
+				continue
+			}
+
 			if callID, ok := st.FuncCallIDs[idx]; ok && callID != "" {
 				args := "{}"
 				if b := st.FuncArgsBuf[idx]; b != nil && b.Len() > 0 {
@@ -662,6 +681,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var reasoningEncrypted string
 	var messageText strings.Builder
 	var haveMessage bool
+	imageCount := 0
 
 	haveOutput := false
 	ensureOutput := func() {
@@ -690,6 +710,11 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if t := p.Get("text"); t.Exists() && t.String() != "" {
 				messageText.WriteString(t.String())
 				haveMessage = true
+				return true
+			}
+			if image, ok := geminiInlineImageFromPart(p); ok {
+				imageCount++
+				appendOutput(responsesImageItemJSON(responsesImageItemID(id, imageCount-1), "completed", image, true))
 				return true
 			}
 			if fc := p.Get("functionCall"); fc.Exists() {
