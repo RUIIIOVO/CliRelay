@@ -72,8 +72,8 @@ func TestApplyCodexPromptCacheHeadersScopesOpenAIResponsePromptCacheKeyByAccount
 		Payload: []byte(`{"model":"gpt-5-codex","prompt_cache_key":"shared-session"}`),
 	}
 
-	bodyA, headersA := applyCodexPromptCacheHeaders(authA, sdktranslator.FromString("openai-response"), req, req.Payload)
-	bodyB, headersB := applyCodexPromptCacheHeaders(authB, sdktranslator.FromString("openai-response"), req, req.Payload)
+	bodyA, headersA := applyCodexPromptCacheHeaders(authA, sdktranslator.FromString("openai-response"), req, req.Payload, cliproxyexecutor.Options{})
+	bodyB, headersB := applyCodexPromptCacheHeaders(authB, sdktranslator.FromString("openai-response"), req, req.Payload, cliproxyexecutor.Options{})
 	sessionA := gjson.GetBytes(bodyA, "prompt_cache_key").String()
 	sessionB := gjson.GetBytes(bodyB, "prompt_cache_key").String()
 
@@ -110,9 +110,13 @@ func TestCodexClaudePromptCacheMapKeyIncludesAccountScope(t *testing.T) {
 	}
 }
 
-func codexCacheHelperRequest(t *testing.T, auth *cliproxyauth.Auth, from sdktranslator.Format, req cliproxyexecutor.Request) *http.Request {
+func codexCacheHelperRequest(t *testing.T, auth *cliproxyauth.Auth, from sdktranslator.Format, req cliproxyexecutor.Request, opts ...cliproxyexecutor.Options) *http.Request {
 	t.Helper()
-	got, err := (&CodexExecutor{}).cacheHelper(context.Background(), auth, from, "https://chatgpt.com/backend-api/codex/responses", req, req.Payload)
+	var execOpts cliproxyexecutor.Options
+	if len(opts) > 0 {
+		execOpts = opts[0]
+	}
+	got, err := (&CodexExecutor{}).cacheHelper(context.Background(), auth, from, "https://chatgpt.com/backend-api/codex/responses", req, req.Payload, execOpts)
 	if err != nil {
 		t.Fatalf("cacheHelper() error = %v", err)
 	}

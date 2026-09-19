@@ -166,7 +166,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = applyCodexServiceTierPolicy(body, execCtx.Request.Payload, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body)
+	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body, execCtx.Options)
 	if err != nil {
 		return resp, err
 	}
@@ -287,7 +287,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = applyCodexConvergenceClientMetadata(body, convergedIDs)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
-	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body)
+	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body, execCtx.Options)
 	if err != nil {
 		return resp, err
 	}
@@ -379,7 +379,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = applyCodexServiceTierPolicy(body, execCtx.Request.Payload, auth)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body)
+	httpReq, err := e.cacheHelper(execCtx.Context, auth, execCtx.SourceFormat, url, req, body, execCtx.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -597,7 +597,7 @@ func maybeStripCodexHistoryDataURLImagesOnRequest(req cliproxyexecutor.Request, 
 	return req, opts
 }
 
-func (e *CodexExecutor) cacheHelper(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
+func (e *CodexExecutor) cacheHelper(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte, opts cliproxyexecutor.Options) (*http.Request, error) {
 	var cache codexCache
 	if from == "claude" {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
@@ -616,6 +616,11 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, auth *cliproxyauth.Auth
 		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
 		if promptCacheKey.Exists() {
 			cache.ID = codexAccountScopedExplicitSessionID(auth, promptCacheKey.String())
+		} else {
+			// Third-party Responses clients often send no session identifier at
+			// all. Leaving the key off costs them most of the prefix cache, so
+			// derive one the same way selection derives the sticky binding.
+			cache.ID = codexSyntheticSessionID(auth, req.Model, codexSessionPromptCacheSeed(opts, req.Payload))
 		}
 	}
 

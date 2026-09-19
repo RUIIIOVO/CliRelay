@@ -135,7 +135,7 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func applyCodexPromptCacheHeaders(auth *cliproxyauth.Auth, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
+func applyCodexPromptCacheHeaders(auth *cliproxyauth.Auth, from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte, opts cliproxyexecutor.Options) ([]byte, http.Header) {
 	headers := http.Header{}
 	if len(rawJSON) == 0 {
 		return rawJSON, headers
@@ -159,6 +159,10 @@ func applyCodexPromptCacheHeaders(auth *cliproxyauth.Auth, from sdktranslator.Fo
 	} else if from == "openai-response" {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
 			cache.ID = codexAccountScopedExplicitSessionID(auth, promptCacheKey.String())
+		} else {
+			// Same fallback as the HTTP path: a client that sends no session
+			// identifier still gets a stable per-conversation cache key.
+			cache.ID = codexSyntheticSessionID(auth, req.Model, codexSessionPromptCacheSeed(opts, req.Payload))
 		}
 	}
 

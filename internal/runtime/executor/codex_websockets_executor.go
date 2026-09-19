@@ -129,7 +129,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		return resp, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body, execCtx.Options)
 	wsHeaders = applyCodexWebsocketHeaders(execCtx.Context, wsHeaders, e.cfg, auth, apiKey)
 	recorder := execCtx.Recorder()
 
@@ -326,7 +326,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body)
+	body, wsHeaders := applyCodexPromptCacheHeaders(auth, execCtx.SourceFormat, req, body, execCtx.Options)
 	wsHeaders = applyCodexWebsocketHeaders(execCtx.Context, wsHeaders, e.cfg, auth, apiKey)
 	recorder := execCtx.Recorder()
 

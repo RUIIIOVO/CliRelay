@@ -4,10 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+// codexSyntheticSessionTTL bounds how long one derived session id is reused.
+// Upstream drops a prompt prefix well before this, so the ceiling only caps how
+// long an abandoned conversation occupies a map entry.
+const codexSyntheticSessionTTL = time.Hour
 
 func codexAccountScopedExplicitSessionID(auth *cliproxyauth.Auth, raw string) string {
 	raw = strings.TrimSpace(raw)
@@ -19,6 +25,34 @@ func codexAccountScopedExplicitSessionID(auth *cliproxyauth.Auth, raw string) st
 		return raw
 	}
 	return codexScopedIdentifier(scope, raw)
+}
+
+// codexSyntheticSessionID mints a stable session id for a client that sends no
+// prompt_cache_key of its own.
+//
+// Upstream uses that key to route same-prefix requests to one prompt cache
+// node; without it the routing is effectively arbitrary, so a conversation that
+// resends a growing prefix every turn still misses most of the time. seed comes
+// from the same body-derived identity that pins the conversation to this
+// account, so every turn resolves to one id and the prefix lands on one node.
+//
+// The result is a fresh UUID rather than a hash of the seed: it is shaped like
+// the identifier a real Codex client sends, and it keeps the seed — which is
+// derived from request content — off the wire.
+func codexSyntheticSessionID(auth *cliproxyauth.Auth, model, seed string) string {
+	if strings.TrimSpace(seed) == "" {
+		return ""
+	}
+	return getOrCreateCodexCacheID(codexPromptCacheMapKey(auth, model, seed), codexSyntheticSessionTTL, newCodexSessionID)
+}
+
+// newCodexSessionID mirrors the time-ordered session identifier a real Codex
+// client generates.
+func newCodexSessionID() string {
+	if v, err := uuid.NewV7(); err == nil {
+		return v.String()
+	}
+	return uuid.NewString()
 }
 
 // codexScopedIdentifier maps one client identifier into an account-scoped one

@@ -66,3 +66,24 @@ func setCodexCache(key string, cache codexCache) {
 	codexCacheMap[key] = cache
 	codexCacheMu.Unlock()
 }
+
+// getOrCreateCodexCacheID returns the id bound to key, minting one under the
+// write lock when there is none.
+//
+// A separate get-then-set lets two concurrent turns of the same conversation
+// both miss and mint different ids, and the loser's turn then carries a cache
+// key upstream has never seen. Deciding inside the lock is what makes the id
+// per-conversation rather than per-request.
+func getOrCreateCodexCacheID(key string, ttl time.Duration, newID func() string) string {
+	if cache, ok := getCodexCache(key); ok {
+		return cache.ID
+	}
+	codexCacheMu.Lock()
+	defer codexCacheMu.Unlock()
+	if cache, ok := codexCacheMap[key]; ok && cache.Expire.After(time.Now()) {
+		return cache.ID
+	}
+	id := newID()
+	codexCacheMap[key] = codexCache{ID: id, Expire: time.Now().Add(ttl)}
+	return id
+}
