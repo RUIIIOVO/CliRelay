@@ -143,6 +143,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			}
 		}
 
+		// Models switched off in the catalog leave the listing for every caller,
+		// not just the scoped ones — the scope filter above is conditional, and an
+		// operator disabling a model means it is gone regardless of who asks.
+		resp.Data = modelconfigsettings.FilterOutDisabled(tenantID, resp.Data)
+
 		// Attach tenant catalog metadata so public clients (apikey-lookup plaza)
 		// can show description + pricing without management credentials.
 		enrichOpenAIModelsWithCatalog(tenantID, resp.Data)
