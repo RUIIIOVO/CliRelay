@@ -3,6 +3,8 @@ package modelcatalog
 import (
 	"net/http"
 	"strings"
+
+	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
 )
 
 const portalRootModelsPath = "/v1/models"
@@ -18,9 +20,9 @@ func (s *Service) PortalVisibleModelIDs(allowedChannelsRaw, allowedGroupsRaw str
 	// ConfiguredAvailability keeps disabled models so the management catalog can
 	// render their toggle; every surface that actually serves models has to take
 	// them back out.
-	configuredIDs := dropDisabledModelIDs(
-		configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw, opts...)),
+	configuredIDs := modelconfigsettings.FilterOutDisabledIDs(
 		s.tenantID,
+		configuredAvailabilityModelIDs(s.ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw, opts...)),
 	)
 	rootPathIDs := rootModelsPathIDs(s.PathAvailability(opts...))
 	visible := make(map[string]struct{})

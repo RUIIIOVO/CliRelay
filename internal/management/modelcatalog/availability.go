@@ -172,7 +172,7 @@ func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string, opts ...Av
 	if !filterOpts.IgnoreGroupAllowedModels {
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
-	allModels = dropDisabledModels(allModels, s.tenantID)
+	allModels = modelconfigsettings.FilterOutDisabled(s.tenantID, allModels)
 
 	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	filteredModels := make([]map[string]any, len(allModels))

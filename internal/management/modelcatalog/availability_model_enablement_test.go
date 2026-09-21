@@ -12,7 +12,7 @@ import (
 
 // The management catalog is built from the static registry, which never looked
 // at model_configs.Enabled. Disabling a registry-backed model therefore left it
-// listed in the management model picker; dropDisabledModels is the step that
+// listed in the management model picker; the disabled-model filter is the step that
 // makes the toggle mean something there.
 
 func seedEnablement(t *testing.T, modelID string, enabled bool) {
@@ -51,7 +51,7 @@ func TestDropDisabledModelsRemovesDisabledEntries(t *testing.T) {
 		{"id": "claude-fable-5-1"},
 	}
 
-	got := modelIDsOf(dropDisabledModels(models, ""))
+	got := modelIDsOf(modelconfigsettings.FilterOutDisabled("", models))
 
 	want := []string{"claude-opus-5", "claude-fable-5-1"}
 	if len(got) != len(want) {
@@ -70,8 +70,8 @@ func TestDropDisabledModelsKeepsEverythingWhenNothingDisabled(t *testing.T) {
 	seedEnablement(t, "claude-opus-5", true)
 
 	models := []map[string]any{{"id": "claude-opus-5"}, {"id": "claude-fable-5-1"}}
-	if got := dropDisabledModels(models, ""); len(got) != 2 {
-		t.Fatalf("dropDisabledModels() = %v, want both models", modelIDsOf(got))
+	if got := modelconfigsettings.FilterOutDisabled("", models); len(got) != 2 {
+		t.Fatalf("FilterOutDisabled() = %v, want both models", modelIDsOf(got))
 	}
 }
 
@@ -81,7 +81,7 @@ func TestDropDisabledModelsMatchesCaseInsensitively(t *testing.T) {
 	seedEnablement(t, "claude-opus-4-6", false)
 
 	models := []map[string]any{{"id": "Claude-Opus-4-6"}, {"id": "claude-opus-5"}}
-	got := modelIDsOf(dropDisabledModels(models, ""))
+	got := modelIDsOf(modelconfigsettings.FilterOutDisabled("", models))
 	if len(got) != 1 || got[0] != "claude-opus-5" {
 		t.Fatalf("ids = %v, want [claude-opus-5]", got)
 	}
@@ -92,8 +92,8 @@ func TestDropDisabledModelsHandlesEmptyInput(t *testing.T) {
 
 	seedEnablement(t, "claude-opus-4-6", false)
 
-	if got := dropDisabledModels(nil, ""); len(got) != 0 {
-		t.Fatalf("dropDisabledModels(nil) = %v, want empty", modelIDsOf(got))
+	if got := modelconfigsettings.FilterOutDisabled("", nil); len(got) != 0 {
+		t.Fatalf("FilterOutDisabled(nil) = %v, want empty", modelIDsOf(got))
 	}
 }
 
@@ -104,7 +104,7 @@ func TestDropDisabledModelIDsRemovesDisabledEntries(t *testing.T) {
 	seedEnablement(t, "claude-opus-5", true)
 
 	ids := map[string]struct{}{"claude-opus-4-6": {}, "claude-opus-5": {}, "claude-fable-5-1": {}}
-	got := dropDisabledModelIDs(ids, "")
+	got := modelconfigsettings.FilterOutDisabledIDs("", ids)
 
 	if _, present := got["claude-opus-4-6"]; present {
 		t.Fatal("disabled model survived the ID filter")

@@ -105,3 +105,117 @@ func TestNormalizeModelKey(t *testing.T) {
 		}
 	}
 }
+
+// The listing filters and the request path used to carry a copy each of "is this
+// model disabled", and the copies disagreed: only the request path understood
+// prefixed aliases. A disabled "gpt-oss:20b" therefore stayed listed as
+// "ollama/gpt-oss:20b" while every call to that alias was refused. They now share
+// IsDisabled, so this asserts all three surfaces agree.
+func TestDisabledPredicateIsSharedAcrossSurfaces(t *testing.T) {
+	initModelConfigServiceTestDB(t)
+
+	seedConfig(t, "gpt-oss:20b", false)
+	seedConfig(t, "claude-opus-5", true)
+
+	disabled := DisabledModelIDs()
+	alias := "ollama/gpt-oss:20b"
+
+	if !IsDisabled(alias, disabled) {
+		t.Fatalf("IsDisabled(%q) = false, want true via the bare model id", alias)
+	}
+
+	listing := FilterOutDisabled("", []map[string]any{
+		{"id": alias},
+		{"id": "gpt-oss:20b"},
+		{"id": "claude-opus-5"},
+	})
+	for _, model := range listing {
+		if id, _ := model["id"].(string); id != "claude-opus-5" {
+			t.Errorf("FilterOutDisabled kept %q, but the request path refuses it", id)
+		}
+	}
+
+	ids := FilterOutDisabledIDs("", map[string]struct{}{
+		alias:           {},
+		"gpt-oss:20b":   {},
+		"claude-opus-5": {},
+	})
+	if _, present := ids[alias]; present {
+		t.Errorf("FilterOutDisabledIDs kept %q, but the request path refuses it", alias)
+	}
+	if _, present := ids["claude-opus-5"]; !present {
+		t.Error("FilterOutDisabledIDs dropped an enabled model")
+	}
+}
+
+// A write has to be visible to the next read on this replica, even though the
+// set is cached for the hot path.
+func TestDisabledModelCacheReflectsWritesImmediately(t *testing.T) {
+	initModelConfigServiceTestDB(t)
+
+	seedConfig(t, "claude-opus-4-6", false)
+	if _, off := DisabledModelIDs()["claude-opus-4-6"]; !off {
+		t.Fatal("freshly disabled model is not in the set")
+	}
+
+	seedConfig(t, "claude-opus-4-6", true)
+	if _, off := DisabledModelIDs()["claude-opus-4-6"]; off {
+		t.Fatal("re-enabled model still reported disabled; the cache was not invalidated after the write")
+	}
+
+	seedConfig(t, "claude-opus-4-6", false)
+	if err := DeleteConfig("claude-opus-4-6"); err != nil {
+		t.Fatalf("DeleteConfig error = %v", err)
+	}
+	if _, off := DisabledModelIDs()["claude-opus-4-6"]; off {
+		t.Fatal("deleted model still reported disabled; the cache was not invalidated after the delete")
+	}
+}
+
+// Each wrapper ("ollama/x", "cline-pass/x") is its own model_configs row with its
+// own toggle. Disabling the bare model cascades to the wrappers because they
+// route to it; disabling one wrapper must not switch off the bare model or the
+// other wrappers.
+func TestDisabledCascadeIsOneWayFromBareModelToWrappers(t *testing.T) {
+	initModelConfigServiceTestDB(t)
+
+	seedConfig(t, "ollama/gpt-oss:20b", false)
+	seedConfig(t, "gpt-oss:20b", true)
+	disabled := DisabledModelIDs()
+
+	if !IsDisabled("ollama/gpt-oss:20b", disabled) {
+		t.Fatal("the disabled wrapper itself is not reported disabled")
+	}
+	for _, id := range []string{"gpt-oss:20b", "cline-pass/gpt-oss:20b"} {
+		if IsDisabled(id, disabled) {
+			t.Errorf("IsDisabled(%q) = true; disabling one wrapper must not cascade to %q", id, id)
+		}
+	}
+}
+
+// The loader refuses to publish a result whose SELECT started before the last
+// invalidation (it compares disabledCacheGen before and after). That guard is
+// only sound if every write path bumps the generation, which is what this pins.
+func TestDisabledModelCacheWritesBumpGeneration(t *testing.T) {
+	initModelConfigServiceTestDB(t)
+
+	readGen := func() uint64 {
+		disabledCacheMu.RLock()
+		defer disabledCacheMu.RUnlock()
+		return disabledCacheGen
+	}
+
+	before := readGen()
+	seedConfig(t, "claude-opus-4-6", false)
+	if after := readGen(); after == before {
+		t.Fatal("upsert did not bump the cache generation; an in-flight load could publish stale rows over it")
+	}
+
+	before = readGen()
+	if err := DeleteConfig("claude-opus-4-6"); err != nil {
+		t.Fatalf("DeleteConfig error = %v", err)
+	}
+	if after := readGen(); after == before {
+		t.Fatal("delete did not bump the cache generation; an in-flight load could publish stale rows over it")
+	}
+}

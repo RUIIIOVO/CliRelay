@@ -154,7 +154,7 @@ func TestDropDisabledCatalogModelsFiltersListing(t *testing.T) {
 		{"id": "gpt-5"},
 	}
 
-	got := dropDisabledCatalogModels("", models)
+	got := modelconfigsettings.FilterOutDisabled("", models)
 
 	var ids []string
 	for _, model := range got {
@@ -172,8 +172,8 @@ func TestDropDisabledCatalogModelsKeepsListWhenNothingDisabled(t *testing.T) {
 	seedModelConfig(t, "claude-opus-5", true)
 
 	models := []map[string]interface{}{{"id": "claude-opus-5"}, {"id": "gpt-5"}}
-	if got := dropDisabledCatalogModels("", models); len(got) != 2 {
+	if got := modelconfigsettings.FilterOutDisabled("", models); len(got) != 2 {
 		encoded, _ := json.Marshal(got)
-		t.Fatalf("dropDisabledCatalogModels() = %s, want both models", encoded)
+		t.Fatalf("FilterOutDisabled() = %s, want both models", encoded)
 	}
 }
