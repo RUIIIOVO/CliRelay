@@ -255,7 +255,10 @@ func dialResponsesWebsocket(t *testing.T) (*websocket.Conn, func()) {
 	httpServer := httptest.NewServer(engine)
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		httpServer.Close()
 		t.Fatalf("dial %s: %v", wsURL, err)
