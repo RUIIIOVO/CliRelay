@@ -250,6 +250,26 @@ func antigravityShouldRetryHost(statusCode int, body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "user location is not supported")
 }
 
+// antigravityLocationGateMaxAttempts caps how many outer attempts (each one a
+// full pass over the host list) a location-gated request may consume.
+//
+// The gate is a per-attempt draw for accounts that are actually served, so one
+// extra pass is enough to clear it most of the time. An account that is really
+// blocked answers the same way on every draw; without a cap it would sit through
+// the whole request-retry ladder with backoff and fail slowly instead of fast.
+const antigravityLocationGateMaxAttempts = 2
+
+// antigravityLocationGateBudget counts the outer attempts a request has spent
+// on the location gate and reports when it must stop retrying.
+type antigravityLocationGateBudget struct{ spent int }
+
+// consume records one location-gated pass over the host list and reports
+// whether another attempt is still allowed.
+func (b *antigravityLocationGateBudget) consume() bool {
+	b.spent++
+	return b.spent < antigravityLocationGateMaxAttempts
+}
+
 func antigravityNoCapacityRetryDelay(attempt int) time.Duration {
 	if attempt < 0 {
 		attempt = 0

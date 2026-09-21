@@ -40,6 +40,47 @@ func TestAntigravityShouldRetryHost(t *testing.T) {
 // got gated, and the 429 is read as an account-level signal that trips the
 // credential cool-down for the requests that follow. Measured: production
 // answered 6/6 requests with RESOURCE_EXHAUSTED for this free-tier account.
+// A really blocked account answers the gate on every draw. The budget is what
+// stops such a request from sitting through the whole request-retry ladder.
+func TestAntigravityLocationGateBudgetStopsAfterMaxAttempts(t *testing.T) {
+	var budget antigravityLocationGateBudget
+	for i := 1; i < antigravityLocationGateMaxAttempts; i++ {
+		if !budget.consume() {
+			t.Fatalf("budget exhausted after %d gated attempt(s), want %d allowed", i, antigravityLocationGateMaxAttempts)
+		}
+	}
+	if budget.consume() {
+		t.Fatalf("budget still allows retries after %d gated attempts", antigravityLocationGateMaxAttempts)
+	}
+	if budget.consume() {
+		t.Fatal("budget re-opened after being exhausted")
+	}
+}
+
+// Both content executors have to consult the budget before taking the backoff
+// path, and the budget must be scoped to the request (declared next to the
+// attempt counter), not shared across requests.
+func TestAntigravityContentPathsHonourLocationGateBudget(t *testing.T) {
+	for _, path := range []string{"antigravity_executor.go", "antigravity_nonstream.go"} {
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(source)
+		decl := strings.Index(body, "var locationGate antigravityLocationGateBudget")
+		attempts := strings.Index(body, "attempts := antigravityRetryAttempts(auth, e.cfg)")
+		if decl < 0 || attempts < 0 || decl < attempts {
+			t.Errorf("%s: the location-gate budget must be declared per request, right after the attempt count", path)
+			continue
+		}
+		consume := strings.Index(body, "retryLocation && !locationGate.consume()")
+		backoff := strings.Index(body, "delay := antigravityNoCapacityRetryDelay(attempt)")
+		if consume < 0 || backoff < 0 || consume > backoff {
+			t.Errorf("%s: the budget must be consumed before the backoff retry is taken", path)
+		}
+	}
+}
+
 func TestAntigravityBaseURLFallbackOrderExcludesProduction(t *testing.T) {
 	baseURLs := antigravityBaseURLFallbackOrder(nil)
 	if len(baseURLs) != 2 {
