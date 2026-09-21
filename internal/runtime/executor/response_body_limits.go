@@ -62,27 +62,39 @@ func readUpstreamErrorBody(provider string, r io.Reader) []byte {
 // bytes, so a rate-limit response reached the client — and the logs — as binary
 // noise instead of the message that explains it.
 func readDecodedUpstreamErrorBody(provider string, header http.Header, r io.Reader) []byte {
-	body := readUpstreamErrorBody(provider, r)
-	if len(body) == 0 || header == nil {
-		return body
+	if header == nil {
+		return readUpstreamErrorBody(provider, r)
 	}
 	encoding := strings.TrimSpace(header.Get("Content-Encoding"))
 	if encoding == "" || strings.EqualFold(encoding, "identity") {
-		return body
+		return readUpstreamErrorBody(provider, r)
 	}
 
-	decoded, err := decodeResponseBody(io.NopCloser(bytes.NewReader(body)), encoding)
+	limit := providerUpstreamBodyReadLimit(provider).errorBytes
+
+	// Read the compressed bytes directly: readUpstreamErrorBody would append a
+	// plain-text truncation marker, which corrupts the stream before it is decoded.
+	compressed, compressedTruncated, err := readBodyAtMost(r, limit)
 	if err != nil {
-		return body
+		return []byte(fmt.Sprintf("failed to read upstream error body: %v", err))
+	}
+	if len(compressed) == 0 {
+		return nil
+	}
+
+	decoded, err := decodeResponseBody(io.NopCloser(bytes.NewReader(compressed)), encoding)
+	if err != nil {
+		return compressed
 	}
 	defer func() { _ = decoded.Close() }()
 
-	limit := providerUpstreamBodyReadLimit(provider).errorBytes
-	raw, truncated, err := readBodyAtMost(decoded, limit)
-	if err != nil || len(raw) == 0 {
-		return body
+	// Keep whatever decoded before any error: a stream cut short still yields the
+	// leading bytes, which is where the provider puts the message.
+	raw, decodedTruncated, decodeErr := readBodyAtMost(decoded, limit)
+	if len(raw) == 0 {
+		return compressed
 	}
-	if truncated {
+	if decodedTruncated || compressedTruncated || decodeErr != nil {
 		raw = append(raw, []byte(fmt.Sprintf("\n[cliproxy: upstream error body truncated at %s]", formatByteLimit(limit)))...)
 	}
 	return raw
