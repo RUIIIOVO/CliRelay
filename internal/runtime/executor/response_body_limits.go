@@ -1,8 +1,10 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 )
 
@@ -49,6 +51,41 @@ func readUpstreamErrorBody(provider string, r io.Reader) []byte {
 		data = append(data, []byte(fmt.Sprintf("\n[cliproxy: upstream error body truncated at %s]", formatByteLimit(limit)))...)
 	}
 	return data
+}
+
+// readDecodedUpstreamErrorBody reads an upstream error body and decodes it per
+// Content-Encoding before the bytes are turned into a client-facing message, a
+// recorded response chunk, or a failure log entry.
+//
+// Anthropic compresses its error payloads (Content-Encoding: br) and the success
+// path already decodes them via decodeResponseBody; the error path used the raw
+// bytes, so a rate-limit response reached the client — and the logs — as binary
+// noise instead of the message that explains it.
+func readDecodedUpstreamErrorBody(provider string, header http.Header, r io.Reader) []byte {
+	body := readUpstreamErrorBody(provider, r)
+	if len(body) == 0 || header == nil {
+		return body
+	}
+	encoding := strings.TrimSpace(header.Get("Content-Encoding"))
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return body
+	}
+
+	decoded, err := decodeResponseBody(io.NopCloser(bytes.NewReader(body)), encoding)
+	if err != nil {
+		return body
+	}
+	defer func() { _ = decoded.Close() }()
+
+	limit := providerUpstreamBodyReadLimit(provider).errorBytes
+	raw, truncated, err := readBodyAtMost(decoded, limit)
+	if err != nil || len(raw) == 0 {
+		return body
+	}
+	if truncated {
+		raw = append(raw, []byte(fmt.Sprintf("\n[cliproxy: upstream error body truncated at %s]", formatByteLimit(limit)))...)
+	}
+	return raw
 }
 
 func readBodyAtMost(r io.Reader, limit int64) ([]byte, bool, error) {
