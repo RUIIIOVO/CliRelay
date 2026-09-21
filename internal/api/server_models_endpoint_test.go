@@ -113,6 +113,71 @@ func TestUnifiedModelsHandlerScopesBusinessTenantToPortalPlazaAndAllowedModels(t
 	}
 }
 
+// An empty catalog for a business tenant means an empty listing. The portal
+// filter must key on "a catalog was computed" (non-nil), not on "the catalog has
+// entries": a len>0 check silently skipped the filter for an empty catalog and
+// let the tenant see every registry model instead of none.
+func TestUnifiedModelsHandlerEmptyTenantCatalogYieldsEmptyListing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const (
+		businessTenant = "cccccccc-dddd-eeee-ffff-000000000002"
+		businessAuthID = "models-business-tenant-empty-catalog-auth"
+		registryModel  = "gpt-business-registry-only"
+		catalogOnly    = "gpt-business-catalog-only"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(businessAuthID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(businessAuthID) })
+	modelRegistry.RegisterClient(businessAuthID, "codex", []*registry.ModelInfo{
+		{ID: registryModel, Object: "model", OwnedBy: "openai"},
+	})
+	// The tenant catalog and the runtime registry do not intersect, so the
+	// portal-visible set is empty.
+	managementauthfiles.StoreDiscoveryCacheForTest(businessTenant, "codex", []*registry.ModelInfo{
+		{ID: catalogOnly, Object: "model", OwnedBy: "openai"},
+	})
+
+	authManager := coreauth.NewManager(nil, nil, nil)
+	authManager.SetConfigForTenant(businessTenant, &config.Config{})
+	if _, err := authManager.Register(context.Background(), &coreauth.Auth{
+		ID: businessAuthID, TenantID: businessTenant, Provider: "codex", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register business auth: %v", err)
+	}
+
+	cfg := &config.Config{}
+	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager)
+	server := &Server{handlers: base, cfg: cfg}
+	openaiHandler := openai.NewOpenAIAPIHandler(base)
+	claudeHandler := claude.NewClaudeCodeAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/models", func(c *gin.Context) {
+		c.Set("tenantID", businessTenant)
+		server.unifiedModelsHandler(openaiHandler, claudeHandler)(c)
+	})
+
+	for _, target := range []string{"/v1/models", "/v1/models?client_version=pi"} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body=%s", target, rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Data []map[string]interface{} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("unmarshal GET %s response: %v", target, err)
+		}
+		if ids := modelIDs(response.Data); len(ids) != 0 {
+			t.Fatalf("GET %s for a tenant with an empty catalog = %#v, want no models", target, ids)
+		}
+	}
+}
+
 func TestUnifiedModelsHandlerKeepsSystemTenantRegistryBehavior(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const (
