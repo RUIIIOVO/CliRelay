@@ -92,6 +92,11 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		}
 		scopedRoutingRestricted := !ignoreGroupAllowedModels &&
 			s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
+		// A tenant with an empty catalog sees an empty listing — that is what the
+		// catalog means for a tenant, and what upstream has always done. The only
+		// caller allowed to fall through an empty catalog is the system-tenant pi
+		// request, where an unconfigured catalog means "nothing curated yet" rather
+		// than "nothing allowed".
 		needsScopeFilter := portalVisibleModelIDs != nil || tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
 		recorder := &responseRecorder{
@@ -314,16 +319,9 @@ func enrichOpenAIModelsWithStaticCapabilities(models []map[string]interface{}) {
 			}
 		}
 
-		if _, exists := model["input_modalities"]; !exists {
-			modalities := []string{"text"}
-			if supportsVision, ok := model["supports_vision"].(bool); ok && supportsVision {
-				modalities = append(modalities, "image")
-			} else if staticSupportsVision(info) {
-				modalities = append(modalities, "image")
-				model["supports_vision"] = true
-			}
-			model["input_modalities"] = modalities
-		}
+		// Modalities are not synthesised here: the registry holds no modality data, so
+		// this could only guess by provider family. enrichOpenAIModelsWithCatalog
+		// publishes the real values from model_configs.
 	}
 }
 
@@ -334,6 +332,11 @@ func staticReasoningLevels(info *registry.ModelInfo) []string {
 		return nil
 	}
 	thinking := info.Thinking
+	// Checked before building the list so a lone "none" cannot be assembled and
+	// then discarded with it.
+	if len(thinking.Levels) == 0 && thinking.Max <= 0 && !thinking.DynamicAllowed {
+		return nil
+	}
 	levels := make([]string, 0, 6)
 	if thinking.ZeroAllowed {
 		levels = append(levels, "none")
@@ -348,23 +351,7 @@ func staticReasoningLevels(info *registry.ModelInfo) []string {
 		}
 		return levels
 	}
-	if thinking.Max <= 0 && !thinking.DynamicAllowed {
-		return nil
-	}
 	return append(levels, "low", "medium", "high")
-}
-
-// staticSupportsVision reports whether a statically known model accepts images.
-func staticSupportsVision(info *registry.ModelInfo) bool {
-	if info == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(info.Type)) {
-	case "claude", "bedrock", "gemini", "openai":
-		return true
-	default:
-		return false
-	}
 }
 
 func ccSwitchRequestModelAllowedForTarget(id string, route *internalrouting.PathRouteContext, allowedModels map[string]struct{}) bool {
