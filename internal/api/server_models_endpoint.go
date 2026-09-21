@@ -97,7 +97,9 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// caller allowed to fall through an empty catalog is the system-tenant pi
 		// request, where an unconfigured catalog means "nothing curated yet" rather
 		// than "nothing allowed".
-		needsScopeFilter := portalVisibleModelIDs != nil || tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
+		piEmptyCatalogFallback := piCatalogRequested && !tenantScoped && len(portalVisibleModelIDs) == 0
+		applyPortalFilter := portalVisibleModelIDs != nil && !piEmptyCatalogFallback
+		needsScopeFilter := applyPortalFilter || tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
 		recorder := &responseRecorder{
 			ResponseWriter: c.Writer,
@@ -127,7 +129,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			filtered := make([]map[string]interface{}, 0, len(resp.Data))
 			for _, model := range resp.Data {
 				if id, ok := model["id"].(string); ok {
-					if portalVisibleModelIDs != nil {
+					if applyPortalFilter {
 						if _, visible := portalVisibleModelIDs[strings.ToLower(strings.TrimSpace(id))]; !visible {
 							continue
 						}
