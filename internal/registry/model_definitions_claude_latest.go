@@ -11,9 +11,9 @@ package registry
 // from the upstream static snapshot, so they are declared here to carry the
 // context window, completion cap and reasoning levels the pi client needs.
 
-// GetLatestClaudeModels returns Claude models newer than the upstream static
-// snapshot in model_definitions_static_data.go.
-func GetLatestClaudeModels() []*ModelInfo {
+// latestClaudeModels returns Claude models newer than the upstream static
+// snapshot. Unexported: callers use GetClaudeModels, which includes these.
+func latestClaudeModels() []*ModelInfo {
 	thinking := func() *ThinkingSupport {
 		return &ThinkingSupport{
 			Min:            1024,
@@ -76,12 +76,14 @@ func GetLatestClaudeModels() []*ModelInfo {
 	}
 }
 
-// ClaudeModelsWithLatest returns the latest-generation Claude definitions
-// followed by the upstream static snapshot. Callers use this instead of
-// GetClaudeModels so newer ids win on de-duplication.
-func ClaudeModelsWithLatest() []*ModelInfo {
-	latest := GetLatestClaudeModels()
-	base := GetClaudeModels()
+// GetClaudeModels returns every Claude model definition, latest generation first
+// so newer ids win on de-duplication.
+//
+// The package's only Claude accessor. It lives here rather than beside the
+// snapshot because the structure ratchet freezes that file's size.
+func GetClaudeModels() []*ModelInfo {
+	latest := latestClaudeModels()
+	base := claudeStaticSnapshot()
 	out := make([]*ModelInfo, 0, len(latest)+len(base))
 	out = append(out, latest...)
 	out = append(out, base...)

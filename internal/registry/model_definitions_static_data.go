@@ -2,8 +2,8 @@
 // This file stores the static model metadata catalog.
 package registry
 
-// GetClaudeModels returns the standard Claude model definitions
-func GetClaudeModels() []*ModelInfo {
+// claudeStaticSnapshot returns the upstream Claude snapshot. Use GetClaudeModels.
+func claudeStaticSnapshot() []*ModelInfo {
 	return []*ModelInfo{
 
 		{

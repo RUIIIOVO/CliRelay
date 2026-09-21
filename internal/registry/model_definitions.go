@@ -32,7 +32,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
 	case "claude":
-		return ClaudeModelsWithLatest()
+		return GetClaudeModels()
 	case "bedrock":
 		return GetBedrockModels()
 	case "gemini":
@@ -99,7 +99,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	allModels := [][]*ModelInfo{
-		ClaudeModelsWithLatest(),
+		GetClaudeModels(),
 		GetBedrockModels(),
 		GetGeminiModels(),
 		GetGeminiVertexModels(),
@@ -136,8 +136,13 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 }
 
 // GetBedrockModels returns the Claude-family model definitions exposed through AWS Bedrock.
+//
+// Built from the static snapshot, not GetClaudeModels: the latest-generation ids
+// (claude-opus-5, claude-fable-5-1, ...) are served by Anthropic's Claude Code
+// OAuth surface and are not exposed through Bedrock, so advertising them here
+// would list models the channel cannot serve.
 func GetBedrockModels() []*ModelInfo {
-	claudeModels := GetClaudeModels()
+	claudeModels := claudeStaticSnapshot()
 	if len(claudeModels) == 0 {
 		return nil
 	}
