@@ -100,6 +100,9 @@
         "github.com/router-for-me/CLIProxyAPI/v6/internal/thinking",
         "github.com/router-for-me/CLIProxyAPI/v6/internal/util"
       ],
+      "sdk/api/handlers/model_gate.go": [
+        "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+      ],
       "sdk/api/handlers/openai/openai_handlers.go": [
         "github.com/router-for-me/CLIProxyAPI/v6/internal/constant",
         "github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces",
