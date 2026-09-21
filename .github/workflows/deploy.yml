@@ -39,7 +39,7 @@ jobs:
       # Must match SCRIPT_VERSION in scripts/deploy-blue-green.sh; the host
       # entrypoint refuses to run on a mismatch. Guarded by
       # TestDeployScriptVersionMatchesWorkflowExpectation.
-      EXPECTED_SCRIPT_VERSION: '2026.09.08.1'
+      EXPECTED_SCRIPT_VERSION: '2026.09.17.1'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -147,6 +147,9 @@ jobs:
           SERVICE_MEMORY_HIGH: ${{ vars.CLIRELAY_SERVICE_MEMORY_HIGH || '1400M' }}
           SERVICE_MEMORY_MAX: ${{ vars.CLIRELAY_SERVICE_MEMORY_MAX || '1600M' }}
           SERVICE_TASKS_MAX: ${{ vars.CLIRELAY_SERVICE_TASKS_MAX || '512' }}
+          # Left empty on purpose: the deploy script derives GOMEMLIMIT from
+          # MemoryHigh. Set the repo variable only to pin an explicit ceiling.
+          SERVICE_GO_MEM_LIMIT: ${{ vars.CLIRELAY_SERVICE_GO_MEM_LIMIT || '' }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -158,6 +161,7 @@ jobs:
              SERVICE_MEMORY_HIGH=$(printf %q "${SERVICE_MEMORY_HIGH}") \
              SERVICE_MEMORY_MAX=$(printf %q "${SERVICE_MEMORY_MAX}") \
              SERVICE_TASKS_MAX=$(printf %q "${SERVICE_TASKS_MAX}") \
+             SERVICE_GO_MEM_LIMIT=$(printf %q "${SERVICE_GO_MEM_LIMIT}") \
              COMMIT_SHA=$(printf %q "${COMMIT_SHA}") \
              EXPECTED_SCRIPT_VERSION=$(printf %q "${EXPECTED_SCRIPT_VERSION}") \
              /usr/local/sbin/clirelay-gha-deploy"

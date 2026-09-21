@@ -22,13 +22,30 @@ func isUnsupportedAdvisoryLockError(err error) bool {
 		strings.Contains(msg, "undefined function") && strings.Contains(msg, "pg_advisory")
 }
 
-// migrationDefaultPassword is the known initial password for one-shot key→user backfill.
-// Admins may change it later from the management UI.
-const migrationDefaultPassword = "password123"
+// lockedAccountHash returns a password hash whose plaintext is generated here
+// and never leaves this function. A backfilled account therefore exists, owns
+// its keys and is visible in the panel, but cannot be signed into until an
+// admin issues a credential through the end-user password reset.
+//
+// This replaces hashing the literal "password123" into every account while
+// leaving must_change_password false. That constant was in the published
+// source and the usernames beside it are derived from API key names, so the
+// migration minted a set of guessable working logins and switched off the one
+// mechanism that would have forced them to be replaced. Locking the accounts
+// instead costs a migrated user nothing they had before: prior to the backfill
+// they owned an API key and had no portal login at all.
+func lockedAccountHash() (string, error) {
+	password, err := randomPassword()
+	if err != nil {
+		return "", err
+	}
+	return HashPassword(password)
+}
 
 // BackfillFromAPIKeys is a one-shot migration: runs only when end_user_backfill_state is empty.
 // After success, marks done so deleted users / unbound keys are never re-created.
-// Username = pinyin/slug of key name; password = password123 (no forced change).
+// Username = pinyin/slug of key name; the account is created without a usable
+// password and must have one issued by an admin (see lockedAccountHash).
 func (s *Service) BackfillFromAPIKeys(ctx context.Context) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
@@ -82,9 +99,18 @@ func (s *Service) BackfillFromAPIKeys(ctx context.Context) (int, error) {
 	}
 	_ = rows.Close()
 
-	passwordHash, err := HashPassword(migrationDefaultPassword)
-	if err != nil {
-		return 0, err
+	// Hash once for the whole migration, and only once there is something to
+	// migrate. Every backfilled account is locked to the same unknown
+	// plaintext, so hashing per account would pay bcrypt's cost per row — tens
+	// of seconds of dead boot time on a tenant with hundreds of keys — to
+	// produce credentials that are equally unusable. Hashing before this point
+	// is what made a fresh database with no keys at all do the work, and die on
+	// it.
+	passwordHash := ""
+	if len(items) > 0 {
+		if passwordHash, err = lockedAccountHash(); err != nil {
+			return 0, err
+		}
 	}
 	created := 0
 	for _, item := range items {
@@ -100,7 +126,7 @@ func (s *Service) BackfillFromAPIKeys(ctx context.Context) (int, error) {
 		userID := uuid.NewString()
 		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO end_users (id, tenant_id, username, username_normalized, display_name, password_hash, must_change_password)
-			VALUES (?, ?, ?, ?, ?, ?, false)
+			VALUES (?, ?, ?, ?, ?, ?, true)
 		`, userID, item.tenantID, uname, NormalizeUsername(uname), display, passwordHash); err != nil {
 			return created, err
 		}
@@ -111,7 +137,12 @@ func (s *Service) BackfillFromAPIKeys(ctx context.Context) (int, error) {
 		}
 		created++
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO end_user_backfill_state (id, done_at) VALUES (1, now()) ON CONFLICT (id) DO NOTHING`); err != nil {
+	// CURRENT_TIMESTAMP rather than now(): the rest of this migration is already
+	// engine-neutral (see isUnsupportedAdvisoryLockError), and the Postgres-only
+	// spelling was the one statement keeping the completed path from being
+	// exercised anywhere but a live Postgres — which is how the boot failure
+	// below it stayed untested.
+	if _, err = tx.ExecContext(ctx, `INSERT INTO end_user_backfill_state (id, done_at) VALUES (1, CURRENT_TIMESTAMP) ON CONFLICT (id) DO NOTHING`); err != nil {
 		return created, err
 	}
 	if err = tx.Commit(); err != nil {

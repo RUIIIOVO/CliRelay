@@ -39,8 +39,11 @@ func openEndUserTestDB(t *testing.T) *sql.DB {
 			failed_login_count INTEGER NOT NULL DEFAULT 0,
 			lock_stage INTEGER NOT NULL DEFAULT 0,
 			locked_until TEXT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
+			-- The Postgres schema defaults both of these to now(), so production
+			-- inserts are allowed to omit them. Without the defaults here the
+			-- fixture rejects statements the real database accepts.
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			version INTEGER NOT NULL DEFAULT 1,
 			permission_profile_id TEXT NOT NULL DEFAULT '',
 			daily_limit INTEGER NOT NULL DEFAULT 0,

@@ -129,6 +129,10 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
+			inlineDataResult := partResult.Get("inlineData")
+			if !inlineDataResult.Exists() {
+				inlineDataResult = partResult.Get("inline_data")
+			}
 
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
@@ -250,6 +254,46 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				}
 				params.ResponseType = 3
 				params.HasContent = true
+			} else if inlineDataResult.Exists() {
+				// Handle generated images. Claude's streaming protocol has no
+				// delta event for image blocks, so the block carries its whole
+				// payload in content_block_start and is closed right away.
+				//
+				// Dropping these parts is what made an image model answer with
+				// `content: null` and a stream that stopped after message_start:
+				// nothing here counted as content, so the final events were
+				// never emitted.
+				data := inlineDataResult.Get("data").String()
+				if data != "" {
+					// Close whatever block is open before starting the image.
+					if params.ResponseType != 0 {
+						output = output + "event: content_block_stop\n"
+						output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+						output = output + "\n\n\n"
+						params.ResponseIndex++
+						params.ResponseType = 0
+					}
+
+					mediaType := inlineDataResult.Get("mimeType").String()
+					if mediaType == "" {
+						mediaType = inlineDataResult.Get("mime_type").String()
+					}
+					if mediaType == "" {
+						mediaType = "image/png"
+					}
+
+					output = output + "event: content_block_start\n"
+					imageBlock := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"image","source":{"type":"base64","media_type":"","data":""}}}`, params.ResponseIndex)
+					imageBlock, _ = sjson.Set(imageBlock, "content_block.source.media_type", mediaType)
+					imageBlock, _ = sjson.Set(imageBlock, "content_block.source.data", data)
+					output = output + fmt.Sprintf("data: %s\n\n\n", imageBlock)
+
+					output = output + "event: content_block_stop\n"
+					output = output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+					output = output + "\n\n\n"
+					params.ResponseIndex++
+					params.HasContent = true
+				}
 			}
 		}
 	}
@@ -467,6 +511,34 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 				ensureContentArray()
 				responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", toolBlock)
+				continue
+			}
+
+			// Generated images arrive as inline data. Without this branch the
+			// content array stays uninitialised for an image-only answer and
+			// the caller receives `content: null`.
+			inlineData := part.Get("inlineData")
+			if !inlineData.Exists() {
+				inlineData = part.Get("inline_data")
+			}
+			if data := inlineData.Get("data").String(); data != "" {
+				flushThinking()
+				flushText()
+
+				mediaType := inlineData.Get("mimeType").String()
+				if mediaType == "" {
+					mediaType = inlineData.Get("mime_type").String()
+				}
+				if mediaType == "" {
+					mediaType = "image/png"
+				}
+
+				imageBlock := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
+				imageBlock, _ = sjson.Set(imageBlock, "source.media_type", mediaType)
+				imageBlock, _ = sjson.Set(imageBlock, "source.data", data)
+
+				ensureContentArray()
+				responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", imageBlock)
 				continue
 			}
 		}

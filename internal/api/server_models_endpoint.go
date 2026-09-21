@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/modelcatalog"
 	modelconfigsettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
@@ -74,15 +75,31 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// very setting being edited. Only the editor sets this flag; plaza and
 		// catalog keep enforcement.
 		ignoreGroupAllowedModels := queryFlagEnabled(c, "ignore_group_allowed_models", "ignore-group-allowed-models")
+		// The pi CLIProxyAPI provider registers every id this endpoint returns into
+		// pi's /model picker, so pi has to see the operator-curated catalog rather
+		// than the raw static registry — otherwise the stale Claude snapshot ids the
+		// management model plaza (and ccswitch) already hide reappear as usable pi
+		// models. pi asks with client_version=pi, the documented contract for this
+		// endpoint, and the catalog stays live: toggling a model in the panel changes
+		// what the next pi refresh registers, with no rebuild and no id list to
+		// maintain on the client.
+		piCatalogRequested := piCatalogRequest(c)
 		var portalVisibleModelIDs map[string]struct{}
-		if tenantScoped && s.handlers != nil {
+		if (tenantScoped || piCatalogRequested) && s.handlers != nil {
 			portalVisibleModelIDs = modelcatalog.NewForTenant(tenantID, s.cfg, s.handlers.AuthManager).
 				PortalVisibleModelIDs(allowedChannelsRaw, allowedChannelGroupsRaw,
 					modelcatalog.AvailabilityFilterOptions{IgnoreGroupAllowedModels: ignoreGroupAllowedModels})
 		}
 		scopedRoutingRestricted := !ignoreGroupAllowedModels &&
 			s.hasScopedRoutingModelRestrictionForTenant(tenantID, routeGroup, allowedChannelGroups)
-		needsScopeFilter := tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
+		// A tenant with an empty catalog sees an empty listing — that is what the
+		// catalog means for a tenant, and what upstream has always done. The only
+		// caller allowed to fall through an empty catalog is the system-tenant pi
+		// request, where an unconfigured catalog means "nothing curated yet" rather
+		// than "nothing allowed".
+		piEmptyCatalogFallback := piCatalogRequested && !tenantScoped && len(portalVisibleModelIDs) == 0
+		applyPortalFilter := portalVisibleModelIDs != nil && !piEmptyCatalogFallback
+		needsScopeFilter := applyPortalFilter || tenantScoped || allowedModels != nil || allowedChannels != nil || allowedChannelGroups != nil || routeGroup != "" || scopedRoutingRestricted
 
 		recorder := &responseRecorder{
 			ResponseWriter: c.Writer,
@@ -112,7 +129,7 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			filtered := make([]map[string]interface{}, 0, len(resp.Data))
 			for _, model := range resp.Data {
 				if id, ok := model["id"].(string); ok {
-					if portalVisibleModelIDs != nil {
+					if applyPortalFilter {
 						if _, visible := portalVisibleModelIDs[strings.ToLower(strings.TrimSpace(id))]; !visible {
 							continue
 						}
@@ -143,9 +160,15 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			}
 		}
 
+		// Models switched off in the catalog leave the listing for every caller,
+		// not just the scoped ones — the scope filter above is conditional, and an
+		// operator disabling a model means it is gone regardless of who asks.
+		resp.Data = modelconfigsettings.FilterOutDisabled(tenantID, resp.Data)
+
 		// Attach tenant catalog metadata so public clients (apikey-lookup plaza)
 		// can show description + pricing without management credentials.
 		enrichOpenAIModelsWithCatalog(tenantID, resp.Data)
+		enrichOpenAIModelsWithStaticCapabilities(resp.Data)
 
 		filteredJSON, err := json.Marshal(resp)
 		if err != nil {
@@ -158,6 +181,15 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		recorder.ResponseWriter.WriteHeader(http.StatusOK)
 		_, _ = recorder.ResponseWriter.Write(filteredJSON)
 	}
+}
+
+// piCatalogRequest reports whether the caller is the pi CLIProxyAPI provider, which
+// builds its model picker from GET {root}/v1/models?client_version=pi.
+func piCatalogRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Query("client_version")), "pi")
 }
 
 // enrichOpenAIModelsWithCatalog fills description/pricing/modalities from the
@@ -226,6 +258,107 @@ func enrichOpenAIModelsWithCatalog(tenantID string, models []map[string]interfac
 			}
 		}
 	}
+}
+
+// enrichOpenAIModelsWithStaticCapabilities publishes the capability metadata the
+// static registry already knows about (context window, completion cap, reasoning
+// efforts, modalities) on the OpenAI-compatible /v1/models payload.
+//
+// Clients that build their model catalog from this endpoint (Codex CLI, the pi
+// CLIProxyAPI provider, ...) otherwise have to fall back to conservative
+// defaults such as a 128k context window and no reasoning support.
+// Existing keys are never overwritten.
+func enrichOpenAIModelsWithStaticCapabilities(models []map[string]interface{}) {
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id, _ := model["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		info := registry.LookupStaticModelInfo(id)
+		if info == nil {
+			if resolved := registry.LookupModelInfo(id); resolved != nil {
+				info = resolved
+			}
+		}
+		if info == nil {
+			continue
+		}
+
+		contextWindow := info.ContextLength
+		if contextWindow <= 0 {
+			contextWindow = info.InputTokenLimit
+		}
+		if contextWindow > 0 {
+			if _, exists := model["context_window"]; !exists {
+				model["context_window"] = contextWindow
+			}
+			if _, exists := model["max_context_window"]; !exists {
+				model["max_context_window"] = contextWindow
+			}
+		}
+
+		maxCompletion := info.MaxCompletionTokens
+		if maxCompletion <= 0 {
+			maxCompletion = info.OutputTokenLimit
+		}
+		if maxCompletion > 0 {
+			if _, exists := model["max_completion_tokens"]; !exists {
+				model["max_completion_tokens"] = maxCompletion
+			}
+			if _, exists := model["max_output_tokens"]; !exists {
+				model["max_output_tokens"] = maxCompletion
+			}
+		}
+
+		if displayName := strings.TrimSpace(info.DisplayName); displayName != "" {
+			if existing, _ := model["display_name"].(string); strings.TrimSpace(existing) == "" {
+				model["display_name"] = displayName
+			}
+		}
+
+		if levels := staticReasoningLevels(info); len(levels) > 0 {
+			if _, exists := model["supported_reasoning_levels"]; !exists {
+				model["supported_reasoning_levels"] = levels
+			}
+		}
+
+		// Modalities are not synthesised here: the registry holds no modality data, so
+		// this could only guess by provider family. enrichOpenAIModelsWithCatalog
+		// publishes the real values from model_configs.
+	}
+}
+
+// staticReasoningLevels maps the registry thinking capability onto the discrete
+// effort vocabulary that OpenAI-responses style clients expect.
+func staticReasoningLevels(info *registry.ModelInfo) []string {
+	if info == nil || info.Thinking == nil {
+		return nil
+	}
+	thinking := info.Thinking
+	// Checked before building the list so a lone "none" cannot be assembled and
+	// then discarded with it.
+	if len(thinking.Levels) == 0 && thinking.Max <= 0 && !thinking.DynamicAllowed {
+		return nil
+	}
+	levels := make([]string, 0, 6)
+	if thinking.ZeroAllowed {
+		levels = append(levels, "none")
+	}
+	if len(thinking.Levels) > 0 {
+		for _, level := range thinking.Levels {
+			level = strings.ToLower(strings.TrimSpace(level))
+			if level == "" || level == "none" {
+				continue
+			}
+			levels = append(levels, level)
+		}
+		return levels
+	}
+	return append(levels, "low", "medium", "high")
 }
 
 func ccSwitchRequestModelAllowedForTarget(id string, route *internalrouting.PathRouteContext, allowedModels map[string]struct{}) bool {

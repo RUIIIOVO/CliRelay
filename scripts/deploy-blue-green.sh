@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SCRIPT_VERSION must stay in sync with deploy gate expectations.
-SCRIPT_VERSION="${SCRIPT_VERSION:-2026.09.08.1}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-2026.09.17.1}"
 set -euo pipefail
 
 SERVICE_NAME="${SERVICE_NAME:-clirelay2}"
@@ -28,6 +28,15 @@ SERVICE_CPU_QUOTA="${SERVICE_CPU_QUOTA:-170%}"
 SERVICE_MEMORY_HIGH="${SERVICE_MEMORY_HIGH:-1400M}"
 SERVICE_MEMORY_MAX="${SERVICE_MEMORY_MAX:-1600M}"
 SERVICE_TASKS_MAX="${SERVICE_TASKS_MAX:-512}"
+# The Go runtime does not read cgroup limits, so on its own it grows the heap
+# until GOGC says to collect — which is well past MemoryHigh. Crossing that
+# watermark hands the cgroup to the kernel, which throttles every allocation
+# and runs synchronous direct reclaim; with no swap on this host the heap is
+# anonymous and unreclaimable, so the process burns CPU scanning pages it can
+# never free and stops answering instead of simply running a GC cycle. Handing
+# the runtime a ceiling below MemoryHigh keeps collection in Go's hands.
+GO_MEM_LIMIT_PERCENT="${GO_MEM_LIMIT_PERCENT:-85}"
+SERVICE_GO_MEM_LIMIT="${SERVICE_GO_MEM_LIMIT:-}"
 COMMIT_SHA="${COMMIT_SHA:?COMMIT_SHA is required}"
 ACTIVE_PORT_FILE="${BASE_DIR}/.active-port"
 CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-${BASE_DIR}/scripts/cleanup-drained-slot.sh}"
@@ -42,6 +51,38 @@ fail() {
 	echo "$*" >&2
 	exit 1
 }
+
+# Convert a systemd byte quantity (1400M, 2G, plain bytes) to bytes. Anything
+# else — "infinity", a percentage, a malformed value — yields nothing so the
+# caller can fall back to leaving GOMEMLIMIT unset.
+systemd_bytes() {
+	case "$1" in
+	'' | *[!0-9KMGkmg]* | [!0-9]*) return 0 ;;
+	esac
+	_num="${1%[KMGkmg]}"
+	case "$_num" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	case "$1" in
+	*[Kk]) echo $((_num * 1024)) ;;
+	*[Mm]) echo $((_num * 1024 * 1024)) ;;
+	*[Gg]) echo $((_num * 1024 * 1024 * 1024)) ;;
+	*) echo "$_num" ;;
+	esac
+}
+
+if [ -z "$SERVICE_GO_MEM_LIMIT" ]; then
+	high_bytes="$(systemd_bytes "$SERVICE_MEMORY_HIGH")"
+	if [ -n "$high_bytes" ] && [ "$high_bytes" -gt 0 ]; then
+		derived="$((high_bytes * GO_MEM_LIMIT_PERCENT / 100))"
+		# A limit this small can only come from a misread MemoryHigh (systemd
+		# treats a suffixless number as bytes). Passing it on would pin the
+		# runtime in back-to-back GC, which is worse than not setting it.
+		if [ "$derived" -ge $((64 * 1024 * 1024)) ]; then
+			SERVICE_GO_MEM_LIMIT="$derived"
+		fi
+	fi
+fi
 
 # Refuse to start when a tool the cutover depends on is missing. The previous
 # version simply carried on without perl, silently skipping the config rewrite
@@ -354,6 +395,9 @@ unit_file="/etc/systemd/system/${next_unit}.service"
 	echo "KillSignal=SIGTERM"
 	echo "TimeoutStopSec=${SHUTDOWN_GRACE_SECONDS}"
 	echo "Environment=CLIRELAY_SHUTDOWN_GRACE=${SHUTDOWN_GRACE_SECONDS}s"
+	# Must stay below MemoryHigh: it is what keeps the runtime collecting on its
+	# own instead of letting the kernel throttle the cgroup into reclaim.
+	[ -n "$SERVICE_GO_MEM_LIMIT" ] && echo "Environment=GOMEMLIMIT=${SERVICE_GO_MEM_LIMIT}"
 	[ -n "$SERVICE_CPU_QUOTA" ] && echo "CPUQuota=${SERVICE_CPU_QUOTA}"
 	[ -n "$SERVICE_MEMORY_HIGH" ] && echo "MemoryHigh=${SERVICE_MEMORY_HIGH}"
 	[ -n "$SERVICE_MEMORY_MAX" ] && echo "MemoryMax=${SERVICE_MEMORY_MAX}"

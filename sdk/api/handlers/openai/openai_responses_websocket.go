@@ -162,6 +162,28 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
+		// The HTTP middleware could not see this model: it ran on the upgrade
+		// request, which has no body. Apply its verdict here, per turn, so a
+		// disabled or not-allowed model is refused on WebSocket exactly as on POST.
+		if gate := handlers.ModelGateFromGin(c); gate != nil {
+			if verdict := gate(modelName); verdict != nil {
+				h.LoggingAPIResponseError(context.WithValue(c.Request.Context(), util.ContextKeyGin, c), verdict)
+				markAPIResponseTimestamp(c)
+				errorPayload, errWrite := writeResponsesWebsocketError(conn, verdict)
+				appendWebsocketEvent(&wsBodyLog, "response", errorPayload)
+				log.Infof(
+					"responses websocket: model %q refused id=%s status=%d",
+					modelName,
+					passthroughSessionID,
+					verdict.StatusCode,
+				)
+				if errWrite != nil {
+					log.Warnf("responses websocket: refusal write failed id=%s error=%v", passthroughSessionID, errWrite)
+					return
+				}
+				continue
+			}
+		}
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, c.Request.Context())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 		cliCtx = handlers.WithExecutionSessionID(cliCtx, passthroughSessionID)

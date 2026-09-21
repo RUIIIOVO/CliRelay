@@ -92,6 +92,14 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		// switch — 429 is an account-level RESOURCE_EXHAUSTED signal, not a
 		// host-specific hiccup: see antigravity_executor.go for the
 		// production trace that motivated dropping the host fallback.
+		//
+		// The location gate is the opposite: it is a per-attempt draw
+		// (antigravityShouldRetryHost), so the other daily host is worth a
+		// try before the rejection reaches the client.
+		if antigravityShouldRetryHost(httpResp.StatusCode, bodyBytes) && idx+1 < len(baseURLs) {
+			log.Debugf("antigravity executor: retryable upstream status %d on base url %s, retrying with fallback base url: %s", httpResp.StatusCode, baseURL, baseURLs[idx+1])
+			continue
+		}
 		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {

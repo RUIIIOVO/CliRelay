@@ -82,6 +82,21 @@ func sessionPromptCacheSeed(opts cliproxyexecutor.Options, payload []byte) strin
 	return ""
 }
 
+// codexSessionPromptCacheSeed extends the shared seed with the body-derived
+// identity that selection uses when a client sends no session marker at all.
+//
+// The extra fallback is deliberately not in sessionPromptCacheSeed: providers
+// that price cache reads separately key their own estimates off that seed, and
+// widening it there changes which requests they count as the same conversation.
+// Codex has no such estimate — its key exists only to steer upstream cache
+// routing — so the looser identity is safe to use here and nowhere else.
+func codexSessionPromptCacheSeed(opts cliproxyexecutor.Options, payload []byte) string {
+	if seed := sessionPromptCacheSeed(opts, payload); seed != "" {
+		return seed
+	}
+	return cliproxyauth.SessionKeyFromRequestBody(payload)
+}
+
 func metadataText(metadata map[string]any, key string) string {
 	if metadata == nil || key == "" {
 		return ""

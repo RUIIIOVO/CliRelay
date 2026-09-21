@@ -8,6 +8,7 @@
 package schedulingload
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ const snapshotTTL = 60 * time.Second
 
 type snapshot struct {
 	ratios      map[string]float64
+	resets      map[string]time.Time
 	refreshedAt time.Time
 }
 
@@ -44,7 +46,7 @@ type Provider struct {
 
 func NewProvider() *Provider {
 	p := &Provider{tenants: make(map[string]struct{})}
-	p.current.Store(&snapshot{ratios: map[string]float64{}})
+	p.current.Store(&snapshot{ratios: map[string]float64{}, resets: map[string]time.Time{}})
 	return p
 }
 
@@ -78,7 +80,10 @@ func (p *Provider) QuotaLoadRatio(auth *coreauth.Auth) (float64, bool) {
 		p.triggerRefresh()
 	}
 	ratio, ok := current.ratios[key]
-	return ratio, ok
+	if !ok {
+		return 0, false
+	}
+	return applyResetDiscount(key, ratio, current.resets), true
 }
 
 func (p *Provider) triggerRefresh() {
@@ -105,6 +110,8 @@ func (p *Provider) Refresh() {
 	p.tenantsMu.RUnlock()
 
 	ratios := make(map[string]float64)
+	resets := make(map[string]time.Time)
+	now := time.Now()
 	for _, tenantID := range tenants {
 		records, err := usage.ListAIAccountStatusForTenant(tenantID, nil)
 		if err != nil {
@@ -120,10 +127,13 @@ func (p *Provider) Refresh() {
 			}
 			if ratio, ok := worstQuotaRatio(record.Quotas); ok {
 				ratios[key] = ratio
+				if reset, rok := soonestReset(record.Quotas, now); rok {
+					resets[key] = reset
+				}
 			}
 		}
 	}
-	p.current.Store(&snapshot{ratios: ratios, refreshedAt: time.Now()})
+	p.current.Store(&snapshot{ratios: ratios, resets: resets, refreshedAt: time.Now()})
 }
 
 // worstQuotaRatio takes the most constrained window for the account. An account
@@ -150,6 +160,62 @@ func worstQuotaRatio(windows []usage.QuotaWindowDTO) (float64, bool) {
 	}
 	return worst, found
 }
+
+// soonestReset returns the earliest upcoming reset across the account's
+// windows. It is the point at which the most exhausted quota refills, so the
+// selector can stop shedding traffic that would otherwise be preserved into a
+// reset that wipes it out anyway. Windows with no reset timestamp are ignored.
+func soonestReset(windows []usage.QuotaWindowDTO, now time.Time) (time.Time, bool) {
+	var soonest time.Time
+	found := false
+	for _, window := range windows {
+		if window.ResetAt == nil {
+			continue
+		}
+		reset := *window.ResetAt
+		if !reset.After(now) {
+			continue
+		}
+		if !found || reset.Before(soonest) {
+			soonest = reset
+			found = true
+		}
+	}
+	return soonest, found
+}
+
+// Reset-discount tuning for long (weekly) windows. Within fullBurnWindow of a
+// reset the remaining quota is about to be wiped, so the seat should burn it
+// freely rather than shed load. From fullBurnWindow out to discountHorizon the
+// discount fades linearly back to zero, so a seat whose reset is still days
+// away is protected as usual.
+const (
+	fullBurnWindow  = 6 * time.Hour
+	discountHorizon = 48 * time.Hour
+)
+
+// resetDiscountFactor scales a quota load ratio down as the account's soonest
+// long-window reset approaches. It returns 1 when no reset is known.
+func resetDiscountFactor(key string, resets map[string]time.Time) float64 {
+	reset, ok := resets[key]
+	if !ok {
+		return 1
+	}
+	until := time.Until(reset)
+	if until <= fullBurnWindow {
+		return 0
+	}
+	if until >= discountHorizon {
+		return 1
+	}
+	return float64(until-fullBurnWindow) / float64(discountHorizon-fullBurnWindow)
+}
+
+func applyResetDiscount(key string, ratio float64, resets map[string]time.Time) float64 {
+	return ratio * resetDiscountFactor(key, resets)
+}
+
+var _ = math.Max
 
 func loadKey(tenantID, authIndex string) string {
 	authIndex = strings.TrimSpace(authIndex)
