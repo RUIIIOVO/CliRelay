@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
 )
 
@@ -191,6 +192,27 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 	}
 	if doneEnc != sig {
 		t.Fatalf("unexpected encrypted_content in response.output_item.done: got %q", doneEnc)
+	}
+}
+
+// The request side can only re-attach a signature it can look up by thinking text,
+// so the response path has to publish it. Codex replays reasoning items with an
+// empty encrypted_content, which makes this cache the only signature source.
+func TestConvertGeminiResponseToOpenAIResponsesCachesThinkingSignature(t *testing.T) {
+	sig := "RXE0RENrZ0lDeEFDR0FJcVFOZDdjUzlleGFuRktRdFcvSzNyZ2MvWDNCcDQ4RmxSbGxOWUlOVU5kR1l1UHMrMGdkMVp0Vkg3ekdKU0g4YVljc2JjN3lNK0FrdGpTNUdqamI4T3Z0VVNETzdQd3pmcFhUOGl3U3hXUEJvTVFRQ09mWTFyMEtTWGZxUUlJakFqdmFGWk83RW1XRlBKckJVOVpkYzdDKw=="
+	text := "cached-thinking-signature-probe"
+	in := []string{
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"thoughtSignature":"` + sig + `","text":"` + text + `"}]}}],"modelVersion":"claude-opus-4-6-thinking","responseId":"req_vrtx_cache"},"traceId":"t1"}`,
+		`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}],"modelVersion":"claude-opus-4-6-thinking","responseId":"req_vrtx_cache"},"traceId":"t1"}`,
+	}
+
+	var param any
+	for _, line := range in {
+		ConvertGeminiResponseToOpenAIResponses(context.Background(), "claude-opus-4-6-thinking", nil, nil, []byte(line), &param)
+	}
+
+	if got := cache.GetCachedSignature("claude-opus-4-6-thinking", text); got != sig {
+		t.Fatalf("cached signature = %q, want %q", got, sig)
 	}
 }
 

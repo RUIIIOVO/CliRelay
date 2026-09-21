@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -138,6 +139,11 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			return
 		}
 		full := st.ReasoningBuf.String()
+		// Remember the signature for this thinking text: the request side re-attaches
+		// it when a client replays the reasoning item without one (Codex sends an
+		// empty encrypted_content). Without it the replayed thought part is unsigned
+		// and Antigravity's Claude models reject the whole request.
+		cache.CacheSignature(modelName, full, st.ReasoningEnc)
 		textDone := `{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`
 		textDone, _ = sjson.Set(textDone, "sequence_number", nextSeq())
 		textDone, _ = sjson.Set(textDone, "item_id", st.ReasoningItemID)
@@ -580,7 +586,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 }
 
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
-func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
 
@@ -739,6 +745,10 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Reasoning output item
 	if reasoningText.Len() > 0 || reasoningEncrypted != "" {
+		// Same signature cache as the streaming path: the request side needs it to
+		// re-attach a signature when the client replays this reasoning item without
+		// one.
+		cache.CacheSignature(modelName, reasoningText.String(), reasoningEncrypted)
 		rid := strings.TrimPrefix(id, "resp_")
 		itemJSON := `{"id":"","type":"reasoning","encrypted_content":""}`
 		itemJSON, _ = sjson.Set(itemJSON, "id", fmt.Sprintf("rs_%s", rid))
