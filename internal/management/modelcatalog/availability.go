@@ -80,6 +80,7 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 	if !filterOpts.IgnoreGroupAllowedModels {
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
+	allModels = dropDisabledModels(allModels, s.tenantID)
 
 	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	data := make([]map[string]any, 0, len(allModels))
@@ -162,6 +163,7 @@ func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string, opts ...Av
 	if !filterOpts.IgnoreGroupAllowedModels {
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
+	allModels = dropDisabledModels(allModels, s.tenantID)
 
 	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	filteredModels := make([]map[string]any, len(allModels))
@@ -724,18 +726,6 @@ func withDefaultMappedOwnerRows(
 		}
 		seen[key] = struct{}{}
 		out = append(out, modelConfigRowAsOpenAIModel(row))
-	}
-	return out
-}
-
-func mappedOwnerRowModelKeys(rows []usage.ModelConfigRow, ownerKeys map[string]bool) map[string]bool {
-	out := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		key := strings.ToLower(strings.TrimSpace(row.ModelID))
-		if key == "" || !row.Enabled || !ownerKeys[normalizeModelOwnerKey(row.OwnedBy)] {
-			continue
-		}
-		out[key] = true
 	}
 	return out
 }

@@ -76,6 +76,54 @@ func GetConfigForTenant(tenantID, modelID string) (usage.ModelConfigRow, bool) {
 	return usage.GetModelConfigForTenant(tenantID, strings.TrimSpace(modelID))
 }
 
+// NormalizeModelKey renders a model ID in the form used as a map key by the
+// disabled-model lookups below.
+func NormalizeModelKey(modelID string) string {
+	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
+// DisabledModelIDs returns the set of models the operator switched off for the
+// system tenant.
+func DisabledModelIDs() map[string]struct{} { return DisabledModelIDsForTenant("") }
+
+// DisabledModelIDsForTenant returns the set of models the operator switched off,
+// keyed by NormalizeModelKey.
+//
+// A model_configs row carries the operator's intent for one model. Every other
+// consumer of Enabled only reads it additively — "should this row contribute a
+// model to the catalog?" — which silently makes the toggle a no-op for any
+// model the static registry already provides. Disabling such a model left it
+// listed in the management catalog, listed in /v1/models, and fully callable.
+//
+// This set is the subtractive half: callers remove these IDs from whatever they
+// are about to serve, so "disabled" means the same thing everywhere.
+func DisabledModelIDsForTenant(tenantID string) map[string]struct{} {
+	rows := usage.ListModelConfigsForTenant(tenantID)
+	disabled := make(map[string]struct{})
+	for _, row := range rows {
+		if row.Enabled {
+			continue
+		}
+		if key := NormalizeModelKey(row.ModelID); key != "" {
+			disabled[key] = struct{}{}
+		}
+	}
+	return disabled
+}
+
+// IsModelDisabledForTenant reports whether one model is switched off.
+func IsModelDisabledForTenant(tenantID, modelID string) bool {
+	key := NormalizeModelKey(modelID)
+	if key == "" {
+		return false
+	}
+	row, ok := usage.GetModelConfigForTenant(tenantID, strings.TrimSpace(modelID))
+	if !ok {
+		return false
+	}
+	return !row.Enabled
+}
+
 func UpsertConfig(input UpsertConfigInput) (usage.ModelConfigRow, error) {
 	return UpsertConfigForTenant("", input)
 }
