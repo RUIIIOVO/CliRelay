@@ -32,7 +32,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
 	case "claude":
-		return GetClaudeModels()
+		return ClaudeModelsWithLatest()
 	case "bedrock":
 		return GetBedrockModels()
 	case "gemini":
@@ -99,7 +99,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 	}
 
 	allModels := [][]*ModelInfo{
-		GetClaudeModels(),
+		ClaudeModelsWithLatest(),
 		GetBedrockModels(),
 		GetGeminiModels(),
 		GetGeminiVertexModels(),
