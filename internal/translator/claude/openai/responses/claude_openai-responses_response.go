@@ -227,9 +227,12 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			// Text produced by the block that is closing. Clients (Codex CLI, pi)
 			// treat these *.done payloads as authoritative and overwrite whatever
 			// they accumulated from the deltas, so they must carry the real text.
-			blockText := st.TextBuf.String()
-			if st.TextBlockStart >= 0 && st.TextBlockStart <= len(blockText) {
-				blockText = blockText[st.TextBlockStart:]
+			// An out-of-range offset falls back to empty, not to the whole buffer:
+			// that would replay every earlier block's text into this one.
+			buffered := st.TextBuf.String()
+			blockText := ""
+			if st.TextBlockStart >= 0 && st.TextBlockStart <= len(buffered) {
+				blockText = buffered[st.TextBlockStart:]
 			}
 			done := `{"type":"response.output_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":"","logprobs":[]}`
 			done, _ = sjson.Set(done, "sequence_number", nextSeq())
