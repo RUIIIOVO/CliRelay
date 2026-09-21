@@ -81,6 +81,28 @@ func (s *Server) setupRoutes() {
 	groupedV1.Use(SystemPromptMiddleware())
 	registerV1Routes(groupedV1)
 
+	// Codex CLI direct route aliases (chatgpt_base_url compatible). Upstream
+	// CLIProxyAPI exposes these; clients such as the Codex CLI and the pi
+	// CLIProxyAPI provider address inference as {root}/backend-api/codex/...
+	codexDirect := s.engine.Group("/backend-api/codex")
+	codexDirect.Use(AuthMiddleware(s.accessManager))
+	codexDirect.Use(rewrittenGroupRoutingMiddleware(resolveRoute))
+	codexDirect.Use(channelGroupAuthorizationMiddleware())
+	codexDirect.Use(middleware.QuotaMiddleware())
+	codexDirect.Use(s.modelRestrictionMiddleware())
+	codexDirect.Use(ccSwitchOpenAIModelMappingMiddleware())
+	codexDirect.Use(SystemPromptMiddleware())
+	{
+		codexDirect.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		codexDirect.GET("/responses", func(c *gin.Context) {
+			clearServerWriteDeadline(c)
+			openaiResponsesHandlers.ResponsesWebsocket(c)
+		})
+		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
+		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		codexDirect.POST("/alpha/search", openaiResponsesHandlers.AlphaSearch)
+	}
+
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
 	v1beta.Use(rewrittenGroupRoutingMiddleware(resolveRoute))

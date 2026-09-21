@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
@@ -16,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -192,6 +196,10 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if claudeFPEnabled {
 		util.ApplyCustomHeadersFromAttrs(r, attrs)
 		applyClaudeIdentityFingerprintHeaders(r.Header, claudeFP, stream, extraBetas, claudeFPSessionID)
+		// A pinned fingerprint is left alone even when its version sits below the
+		// gate: UA, Stainless versions and betas are pinned as one identity, and
+		// upgrading the UA alone would emit a combination no real client sends.
+		warnIfClaudeFingerprintBelowVersionGate(authIdentifier(auth), r.Header.Get("User-Agent"))
 		r.Header.Set("Connection", "keep-alive")
 		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 		return
@@ -237,7 +245,19 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", hdrDefault(hd.UserAgent, config.BuildClaudeFingerprintUserAgent(config.DefaultClaudeFingerprintCLIVersion, config.DefaultClaudeFingerprintEntrypoint)))
+	// Anthropic gates newer models (e.g. claude-fable-5-1) on the reported
+	// Claude Code version and on the canonical
+	// "claude-cli/<version> (external, <entrypoint>)" User-Agent shape. A
+	// client that sends its own agent (curl, a bare "claude-cli/x.y.z"
+	// without the suffix, or an outdated version) would otherwise be
+	// forwarded verbatim and rejected with claude_code_version_too_old.
+	// Forward a client agent only when it satisfies the gate, and hold the
+	// configured default to the same floor.
+	canonicalUA := claudeUserAgentAtVersionFloor(hd.UserAgent)
+	if ua := strings.TrimSpace(ginHeaders.Get("User-Agent")); claudeUserAgentMeetsGate(ua) {
+		canonicalUA = ua
+	}
+	r.Header.Set("User-Agent", canonicalUA)
 	r.Header.Set("Connection", "keep-alive")
 	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
@@ -262,4 +282,89 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+// claudeGateUARe matches the canonical Claude Code User-Agent shape that
+// Anthropic parses for its minimum-version model gate.
+var claudeGateUARe = regexp.MustCompile(`(?i)^claude-cli/([0-9]+(?:\.[0-9]+){0,3})\s+\(external,\s*[^)]+\)`)
+
+// warnIfClaudeFingerprintBelowVersionGate reports a pinned fingerprint whose
+// version Anthropic will refuse for the gated models. Never rewrites the header;
+// the operator has to re-enrol the account or raise its configured version.
+//
+// Logged at Warn, once per (account, agent) pair: this is an operator action
+// item, not a per-request trace, and repeating it on every request would bury
+// the log.
+func warnIfClaudeFingerprintBelowVersionGate(authID, ua string) {
+	if claudeUserAgentMeetsGate(ua) {
+		return
+	}
+	ua = strings.TrimSpace(ua)
+	if _, seen := claudeFingerprintGateWarned.LoadOrStore(authID+"\x00"+ua, struct{}{}); seen {
+		return
+	}
+	log.Warnf("claude identity fingerprint for account %q reports %q, below the %s gate: models gated on a newer Claude Code version will be refused for this account until it is re-enrolled or its configured version is raised",
+		authID, ua, config.DefaultClaudeFingerprintCLIVersion)
+}
+
+// claudeFingerprintGateWarned de-duplicates the version-gate warning per
+// (account, agent) pair for the life of the process.
+var claudeFingerprintGateWarned sync.Map
+
+// authIdentifier renders an auth for log lines without dereferencing nil.
+func authIdentifier(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+// claudeUserAgentAtVersionFloor returns ua when it satisfies the gate, otherwise
+// the canonical current agent. Non-fingerprint path only — there the agent string
+// is not part of a pinned identity.
+func claudeUserAgentAtVersionFloor(ua string) string {
+	if claudeUserAgentMeetsGate(ua) {
+		return strings.TrimSpace(ua)
+	}
+	return config.BuildClaudeFingerprintUserAgent(
+		config.DefaultClaudeFingerprintCLIVersion,
+		config.DefaultClaudeFingerprintEntrypoint,
+	)
+}
+
+// claudeUserAgentMeetsGate reports whether a client-supplied User-Agent is a
+// well-formed Claude Code agent at or above the configured minimum version.
+func claudeUserAgentMeetsGate(ua string) bool {
+	m := claudeGateUARe.FindStringSubmatch(strings.TrimSpace(ua))
+	if m == nil {
+		return false
+	}
+	return compareClaudeVersions(m[1], config.DefaultClaudeFingerprintCLIVersion) >= 0
+}
+
+// compareClaudeVersions compares dotted numeric versions, treating missing
+// components as zero. Returns -1, 0 or 1.
+func compareClaudeVersions(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		var av, bv int
+		if i < len(as) {
+			av, _ = strconv.Atoi(strings.TrimSpace(as[i]))
+		}
+		if i < len(bs) {
+			bv, _ = strconv.Atoi(strings.TrimSpace(bs[i]))
+		}
+		if av != bv {
+			if av < bv {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }

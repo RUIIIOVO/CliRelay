@@ -162,6 +162,7 @@ func UpsertConfigForTenant(tenantID string, input UpsertConfigInput) (usage.Mode
 	if err := usage.UpsertModelConfigForTenant(tenantID, row); err != nil {
 		return usage.ModelConfigRow{}, err
 	}
+	InvalidateDisabledModelCache()
 
 	saved, ok := usage.GetModelConfigForTenant(tenantID, row.ModelID)
 	if !ok {
@@ -176,7 +177,11 @@ func DeleteConfigForTenant(tenantID, modelID string) error {
 	if modelID == "" {
 		return ErrModelIDRequired
 	}
-	return usage.DeleteModelConfigForTenant(tenantID, modelID)
+	if err := usage.DeleteModelConfigForTenant(tenantID, modelID); err != nil {
+		return err
+	}
+	InvalidateDisabledModelCache()
+	return nil
 }
 
 func ListOwnerPresetsWithCounts() []OwnerPresetWithCount {

@@ -80,6 +80,14 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 	if !filterOpts.IgnoreGroupAllowedModels {
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
+	// Disabled models deliberately stay in this list. This is the operator's own
+	// catalog view (GET /models/configured-availability): the panel intersects the
+	// model_configs rows with it, so dropping a disabled model here removes the row
+	// that carries its toggle — the model vanishes from the page and can never be
+	// switched back on. The subtraction belongs to the surfaces that serve models:
+	// Models() for the plaza and the channel-group editor, PortalVisibleModelIDs
+	// for pi and the public catalog, dropDisabledCatalogModels for /v1/models, and
+	// the request path itself.
 
 	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	data := make([]map[string]any, 0, len(allModels))
@@ -91,9 +99,10 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 			continue
 		}
 		entry := map[string]any{
-			"id":     id,
-			"object": "model",
-			"source": "registry",
+			"id":      id,
+			"object":  "model",
+			"source":  "registry",
+			"enabled": true,
 		}
 		if src, _ := model["source"].(string); strings.TrimSpace(src) != "" {
 			entry["source"] = src
@@ -111,6 +120,7 @@ func (s *Service) ConfiguredAvailability(allowedChannelsRaw, allowedGroupsRaw st
 		}
 		if row, ok := configByID[strings.ToLower(id)]; ok {
 			attachModelConfigCapabilities(entry, row)
+			entry["enabled"] = row.Enabled
 			if row.Description != "" {
 				entry["description"] = row.Description
 			}
@@ -162,6 +172,7 @@ func (s *Service) Models(allowedChannelsRaw, allowedGroupsRaw string, opts ...Av
 	if !filterOpts.IgnoreGroupAllowedModels {
 		allModels = s.filterModelsByRoutingAllowedModels(allModels, allowedGroupsRaw)
 	}
+	allModels = modelconfigsettings.FilterOutDisabled(s.tenantID, allModels)
 
 	configByID, pricingByID := pricingLookupMapsForTenant(s.tenantID)
 	filteredModels := make([]map[string]any, len(allModels))
@@ -661,28 +672,6 @@ func shouldUseDefaultMappedOwnerScope(allowedChannelsRaw, allowedGroupsRaw strin
 	return strings.TrimSpace(allowedChannelsRaw) == "" && strings.TrimSpace(allowedGroupsRaw) == ""
 }
 
-func (s *Service) defaultMappedOwnerRows() ([]usage.ModelConfigRow, map[string]bool, map[string]bool, bool) {
-	ownerKeys := s.defaultMappedOwnerKeys()
-	if len(ownerKeys) == 0 {
-		return nil, nil, nil, false
-	}
-	rows := modelconfigsettings.ListAllConfigsForTenant(s.tenantID)
-	out := make([]usage.ModelConfigRow, 0, len(rows))
-	configuredModelKeys := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		if !row.Enabled {
-			continue
-		}
-		if key := strings.ToLower(strings.TrimSpace(row.ModelID)); key != "" {
-			configuredModelKeys[key] = true
-		}
-		if ownerKeys[normalizeModelOwnerKey(row.OwnedBy)] {
-			out = append(out, row)
-		}
-	}
-	return out, ownerKeys, configuredModelKeys, true
-}
-
 func withDefaultMappedOwnerRows(
 	modelRegistry *registry.ModelRegistry,
 	models []map[string]any,
@@ -724,18 +713,6 @@ func withDefaultMappedOwnerRows(
 		}
 		seen[key] = struct{}{}
 		out = append(out, modelConfigRowAsOpenAIModel(row))
-	}
-	return out
-}
-
-func mappedOwnerRowModelKeys(rows []usage.ModelConfigRow, ownerKeys map[string]bool) map[string]bool {
-	out := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		key := strings.ToLower(strings.TrimSpace(row.ModelID))
-		if key == "" || !row.Enabled || !ownerKeys[normalizeModelOwnerKey(row.OwnedBy)] {
-			continue
-		}
-		out[key] = true
 	}
 	return out
 }
