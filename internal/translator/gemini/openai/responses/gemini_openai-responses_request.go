@@ -11,6 +11,14 @@ import (
 
 const geminiResponsesThoughtSignature = "skip_thought_signature_validator"
 
+// responsesModelRequiresSignedThought reports whether the target rejects a
+// replayed thinking part that carries no signature. Only the Claude family does;
+// the skip sentinel the gemini->antigravity stage injects is not honoured there.
+// Mirrors the family check in antigravity_gemini_request.go.
+func responsesModelRequiresSignedThought(modelName string) bool {
+	return strings.Contains(strings.ToLower(modelName), "claude")
+}
+
 func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
@@ -337,15 +345,20 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// Codex replays its own reasoning items with an empty
 				// `encrypted_content`, so the client-supplied value is usually useless.
 				// Fall back to the signature the response side cached for this exact
-				// thinking text (the same cache the Claude Code path uses) and drop the
-				// part when neither source has one — an absent thinking block is always
-				// accepted, an unsigned one never is.
+				// thinking text (the same cache the Claude Code path uses).
+				//
+				// Only the Claude family drops the part when neither source has one —
+				// there an absent thinking block is always accepted and an unsigned one
+				// never is. Every other family keeps the unsigned part: the
+				// gemini->antigravity stage stamps skip_thought_signature_validator on
+				// it, which upstream accepts, and dropping it would lose the replayed
+				// reasoning for models that were never affected.
 				thoughtText := item.Get("summary.0.text").String()
 				thoughtSignature := strings.TrimSpace(item.Get("encrypted_content").String())
 				if thoughtSignature == "" && modelName != "" {
 					thoughtSignature = cache.GetCachedSignature(modelName, thoughtText)
 				}
-				if thoughtSignature == "" {
+				if thoughtSignature == "" && responsesModelRequiresSignedThought(modelName) {
 					break
 				}
 
