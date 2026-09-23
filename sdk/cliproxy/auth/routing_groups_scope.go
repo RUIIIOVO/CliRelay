@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdkrouting "github.com/router-for-me/CLIProxyAPI/v6/sdk/routing"
 )
 
 func channelGroupScheduling(cfg *runtimeConfigSnapshot, groupName string) (runtimeGroupScheduling, bool) {
@@ -380,17 +381,38 @@ func modelAllowedByRoutingGroupScopes(cfg *runtimeConfigSnapshot, modelID string
 		if _, ok := scopedGroups[groupName]; !ok {
 			continue
 		}
-		if len(group.AllowedModels) == 0 {
+		if len(group.AllowedModels) == 0 && len(group.ExcludedModels) == 0 {
 			return true
 		}
 		foundRestrictedGroup = true
-		if routingGroupAllowsModel(groupName, group.AllowedModels, modelID) {
+		if routingGroupModelAllowed(groupName, group.AllowedModels, group.ExcludedModels, modelID) {
 			return true
 		}
 	}
 	return !foundRestrictedGroup
 }
 
+// routingGroupModelAllowed applies one group's model gate.
+//
+// An exclusion wins over an allow entry. With no allow list, everything the
+// group's channels serve passes except the exclusions, which is what keeps
+// newly added upstream models usable. The two lists match differently on
+// purpose: an exclusion that misses serves a model the operator blocked, so it
+// matches loosely (see sdkrouting.ChannelGroupExcludesModel); an allow entry
+// that misses only refuses one, so it keeps its exact match.
+func routingGroupModelAllowed(groupName string, allowedModels, excludedModels []string, modelID string) bool {
+	if sdkrouting.ChannelGroupExcludesModel(excludedModels, modelID) {
+		return false
+	}
+	if len(allowedModels) == 0 {
+		return strings.TrimSpace(modelID) != ""
+	}
+	return routingGroupAllowsModel(groupName, allowedModels, modelID)
+}
+
+// routingGroupAllowsModel reports whether an allow list names the model. It has
+// no wildcard: "*" in an allow list never meant "everything", and reading it
+// that way would open a group that was configured to serve nothing.
 func routingGroupAllowsModel(groupName string, allowedModels []string, modelID string) bool {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
