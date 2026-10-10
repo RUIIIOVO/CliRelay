@@ -573,10 +573,42 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			}
 		}
 
+		// A malformed-call finish with nothing for the client to act on is a
+		// failed turn, not a completed one: reported as completed, an agent
+		// harness ends the turn on a response that holds only reasoning.
+		if errJSON, failed := geminiMalformedCallError(root.Get("candidates.0"), st.MsgOpened || len(st.FuncCallIDs) > 0); failed {
+			completed, _ = sjson.Set(completed, "type", "response.failed")
+			completed, _ = sjson.Set(completed, "response.status", "failed")
+			completed, _ = sjson.SetRaw(completed, "response.error", errJSON)
+			out = append(out, emitEvent("response.failed", completed))
+			return out
+		}
+
 		out = append(out, emitEvent("response.completed", completed))
 	}
 
 	return out
+}
+
+// geminiMalformedCallError builds the Responses error for a turn Gemini ended
+// with MALFORMED_FUNCTION_CALL: it planned a tool call and failed to emit it.
+// It applies only when the turn produced no text or function call; otherwise the
+// client has output it can act on and the turn stands.
+//
+// The executor re-asks upstream before this is reached, so this is the answer
+// once those retries are spent. The message carries the conventional "You can
+// retry your request" so clients that retry transient errors do so.
+func geminiMalformedCallError(candidate gjson.Result, producedOutput bool) (string, bool) {
+	if producedOutput || !strings.EqualFold(strings.TrimSpace(candidate.Get("finishReason").String()), "MALFORMED_FUNCTION_CALL") {
+		return "", false
+	}
+	detail := strings.TrimSpace(candidate.Get("finishMessage").String())
+	if detail == "" {
+		detail = "the model ended its turn with a function call that could not be parsed"
+	}
+	errJSON := `{"code":"server_error","message":""}`
+	errJSON, _ = sjson.Set(errJSON, "message", "Upstream returned MALFORMED_FUNCTION_CALL: "+detail+". You can retry your request.")
+	return errJSON, true
 }
 
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
@@ -681,6 +713,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var reasoningEncrypted string
 	var messageText strings.Builder
 	var haveMessage bool
+	var haveCall bool
 	imageCount := 0
 
 	haveOutput := false
@@ -718,6 +751,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				return true
 			}
 			if fc := p.Get("functionCall"); fc.Exists() {
+				haveCall = true
 				name := fc.Get("name").String()
 				args := fc.Get("args")
 				callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
@@ -777,6 +811,11 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		if v := um.Get("totalTokenCount"); v.Exists() {
 			resp, _ = sjson.Set(resp, "usage.total_tokens", v.Int())
 		}
+	}
+
+	if errJSON, failed := geminiMalformedCallError(root.Get("candidates.0"), haveMessage || haveCall || imageCount > 0); failed {
+		resp, _ = sjson.Set(resp, "status", "failed")
+		resp, _ = sjson.SetRaw(resp, "error", errJSON)
 	}
 
 	return resp
