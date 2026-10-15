@@ -128,7 +128,9 @@ func TestAntigravityStreamMalformedFunctionCallStopsAfterRetries(t *testing.T) {
 	}
 }
 
-// Once the client has text, a retry would duplicate it; the answer stands.
+// Once the client has text, a retry would duplicate it, so the executor does
+// not re-request: one upstream call and exactly one terminal event. Whether
+// that terminal reads completed or failed is the translator's decision.
 func TestAntigravityStreamDoesNotRetryAfterVisibleOutput(t *testing.T) {
 	sseText := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Checking now."}]}}],"responseId":"r1"}}` + "\n\n"
 	server, calls := upstreamSequence(t, sseText+sseMalformed, sseCall+sseStop)
@@ -137,8 +139,11 @@ func TestAntigravityStreamDoesNotRetryAfterVisibleOutput(t *testing.T) {
 	if got := atomic.LoadInt32(calls); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
 	}
-	if n := len(eventsOfType(events, "response.completed")); n != 1 {
-		t.Fatalf("response.completed events = %d, want 1", n)
+	terminals := len(eventsOfType(events, "response.completed")) +
+		len(eventsOfType(events, "response.incomplete")) +
+		len(eventsOfType(events, "response.failed"))
+	if terminals != 1 {
+		t.Fatalf("terminal events = %d, want 1", terminals)
 	}
 }
 

@@ -286,11 +286,16 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
 			}
 		}
-		lines := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
-		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+		// Only a clean end of stream is passed on as [DONE]; see the
+		// antigravity executor.
+		errScan := scanner.Err()
+		if errScan == nil {
+			lines := sdktranslator.TranslateStream(execCtx.Context, to, execCtx.SourceFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+			for i := range lines {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan != nil {
 			recorder.RecordResponseError(errScan)
 			reporter.publishFailure(execCtx.Context)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}

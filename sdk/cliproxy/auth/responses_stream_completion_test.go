@@ -104,3 +104,34 @@ func TestResponsesStreamCompletionTrackerRejectsTrueIncompleteStream(t *testing.
 		t.Fatalf("ErrIfIncomplete() error = %v, want incomplete stream message", err)
 	}
 }
+
+// response.incomplete (max_output_tokens, content_filter) ends the stream
+// normally; it must not be reported as a dropped stream and penalise the account.
+func TestResponsesStreamCompletionTrackerAcceptsIncomplete(t *testing.T) {
+	t.Parallel()
+
+	tracker := newResponsesStreamCompletionTracker(sdktranslator.FormatOpenAIResponse)
+	tracker.Observe([]byte("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"))
+	tracker.Observe([]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n"))
+
+	if err := tracker.ErrIfIncomplete(); err != nil {
+		t.Fatalf("ErrIfIncomplete() error = %v, want nil", err)
+	}
+}
+
+// A failure of what the model sampled (Gemini MALFORMED_FUNCTION_CALL, an empty
+// turn) is not an upstream fault and must not count against the credential.
+func TestResponsesStreamCompletionTrackerAcceptsModelOutputFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, chunk := range []string{
+		"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"model_output_error\",\"code\":\"malformed_function_call\",\"message\":\"upstream model stopped with finishReason=MALFORMED_FUNCTION_CALL; please retry your request\"}}}\n\n",
+		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"model_output_error\",\"code\":\"empty_response\",\"message\":\"x\"}}}\n\n",
+	} {
+		tracker := newResponsesStreamCompletionTracker(sdktranslator.FormatOpenAIResponse)
+		tracker.Observe([]byte(chunk))
+		if err := tracker.ErrIfIncomplete(); err != nil {
+			t.Fatalf("ErrIfIncomplete() error = %v, want nil for %q", err, chunk)
+		}
+	}
+}

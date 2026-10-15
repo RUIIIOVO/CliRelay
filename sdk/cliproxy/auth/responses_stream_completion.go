@@ -11,9 +11,18 @@ import (
 )
 
 const (
-	responsesStreamCompletedType = "response.completed"
-	responsesStreamFailedType    = "response.failed"
-	responsesStreamErrorType     = "error"
+	responsesStreamCompletedType  = "response.completed"
+	responsesStreamIncompleteType = "response.incomplete"
+	responsesStreamFailedType     = "response.failed"
+	responsesStreamErrorType      = "error"
+
+	// responsesModelOutputErrorType marks a response.failed that describes
+	// what the model sampled (for example a Gemini MALFORMED_FUNCTION_CALL or an
+	// empty turn), not a fault of the upstream account. The stream reached its
+	// end normally, so it must not count against the credential: treating it as
+	// a 502 parks the model on that account and the client's retry then finds
+	// no account to use. Set by the Gemini -> Responses translator.
+	responsesModelOutputErrorType = "model_output_error"
 )
 
 type responsesStreamCompletionTracker struct {
@@ -93,12 +102,17 @@ func responsesSSEBlockTerminalState(block []byte) (bool, error) {
 }
 
 func responsesSSEEventTerminalState(eventType string, data string) (bool, error) {
-	if eventType == responsesStreamCompletedType {
+	// response.incomplete is a normal end of stream (max_output_tokens,
+	// content_filter), not a dropped connection.
+	if eventType == responsesStreamCompletedType || eventType == responsesStreamIncompleteType {
 		return true, nil
 	}
 	if eventType == responsesStreamFailedType || eventType == responsesStreamErrorType {
 		if strings.TrimSpace(data) == "" {
 			return false, nil
+		}
+		if responsesModelOutputFailure(data) {
+			return true, nil
 		}
 		return false, responsesStreamTerminalError(eventType, data)
 	}
@@ -111,9 +125,12 @@ func responsesSSEEventTerminalState(eventType string, data string) (bool, error)
 	}
 	payloadType := strings.TrimSpace(payload.Type)
 	switch payloadType {
-	case responsesStreamCompletedType:
+	case responsesStreamCompletedType, responsesStreamIncompleteType:
 		return true, nil
 	case responsesStreamFailedType, responsesStreamErrorType:
+		if responsesModelOutputFailure(data) {
+			return true, nil
+		}
 		return false, responsesStreamTerminalError(payloadType, data)
 	default:
 		return false, nil
@@ -235,6 +252,19 @@ type responsesStreamTerminalPayload struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	} `json:"response"`
+}
+
+// responsesModelOutputFailure reports whether a failed event describes the
+// model's output rather than an upstream fault (see responsesModelOutputErrorType).
+func responsesModelOutputFailure(data string) bool {
+	if strings.TrimSpace(data) == "" || !json.Valid([]byte(data)) {
+		return false
+	}
+	var payload responsesStreamTerminalPayload
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return false
+	}
+	return firstNonEmpty(payload.Response.Error.Type, payload.Error.Type) == responsesModelOutputErrorType
 }
 
 func responsesStreamTerminalError(eventType string, data string) *Error {

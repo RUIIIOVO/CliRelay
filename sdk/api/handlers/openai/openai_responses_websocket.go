@@ -23,15 +23,17 @@ import (
 )
 
 const (
-	wsRequestTypeCreate  = "response.create"
-	wsRequestTypeAppend  = "response.append"
-	wsEventTypeError     = "error"
-	wsEventTypeCompleted = "response.completed"
-	wsEventTypeDone      = "response.done"
-	wsDoneMarker         = "[DONE]"
-	wsTurnStateHeader    = "x-codex-turn-state"
-	wsRequestBodyKey     = "REQUEST_BODY_OVERRIDE"
-	wsPayloadLogMaxSize  = 2048
+	wsRequestTypeCreate   = "response.create"
+	wsRequestTypeAppend   = "response.append"
+	wsEventTypeError      = "error"
+	wsEventTypeCompleted  = "response.completed"
+	wsEventTypeDone       = "response.done"
+	wsEventTypeIncomplete = "response.incomplete"
+	wsEventTypeFailed     = "response.failed"
+	wsDoneMarker          = "[DONE]"
+	wsTurnStateHeader     = "x-codex-turn-state"
+	wsRequestBodyKey      = "REQUEST_BODY_OVERRIDE"
+	wsPayloadLogMaxSize   = 2048
 )
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
@@ -568,6 +570,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
+				} else if eventType == wsEventTypeIncomplete || eventType == wsEventTypeFailed {
+					// Both end the response; without this the closed stream is
+					// reported again as "stream closed before response.completed".
+					// A failed turn's output is not kept for the next request.
+					completed = true
+					if eventType == wsEventTypeIncomplete {
+						completedOutput = responseCompletedOutputFromPayload(payloads[i])
+					}
 				}
 				markAPIResponseTimestamp(c)
 				appendWebsocketEvent(wsBodyLog, "response", payloads[i])

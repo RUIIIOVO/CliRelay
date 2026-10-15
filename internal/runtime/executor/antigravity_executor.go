@@ -355,7 +355,13 @@ attemptLoop:
 						translate(geminiTerminalOnly(heldTerminal))
 					}
 
-					translate([]byte("[DONE]"))
+					// [DONE] tells the translator the stream ended normally, and some
+					// translators synthesize a terminal event from it. A read error is
+					// not a normal end: the client must see the error, not a reply that
+					// looks complete.
+					if errScan == nil {
+						translate([]byte("[DONE]"))
+					}
 					if errScan != nil {
 						recorder.RecordResponseError(errScan)
 						reporter.publishFailure(execCtx.Context)

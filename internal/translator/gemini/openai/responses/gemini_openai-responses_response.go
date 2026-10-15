@@ -17,6 +17,8 @@ type geminiToResponsesState struct {
 	ResponseID string
 	CreatedAt  int64
 	Started    bool
+	Finished   bool   // a terminal event has been emitted
+	LastUsage  string // latest usageMetadata, reused for a synthesized end
 
 	// message aggregation
 	MsgOpened    bool
@@ -116,8 +118,8 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	rawJSON = bytes.TrimSpace(rawJSON)
-	if len(rawJSON) == 0 || bytes.Equal(rawJSON, []byte("[DONE]")) {
+	rawJSON, ok := geminiStreamChunkToConvert(st, bytes.TrimSpace(rawJSON))
+	if !ok {
 		return []string{}
 	}
 
@@ -388,6 +390,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 	// Finalization on finishReason
 	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
+		st.Finished = true
 		// Finalize reasoning first to keep ordering tight with last delta
 		finalizeReasoning()
 		finalizeMessage()
@@ -573,14 +576,14 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			}
 		}
 
-		out = append(out, emitEvent("response.completed", completed))
+		out = append(out, finishGeminiStreamResponse(st, modelName, root, completed))
 	}
 
 	return out
 }
 
 // ConvertGeminiResponseToOpenAIResponsesNonStream aggregates Gemini response JSON into a single OpenAI Responses JSON object.
-func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
 
@@ -681,6 +684,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	var reasoningEncrypted string
 	var messageText strings.Builder
 	var haveMessage bool
+	haveFunctionCall := false
 	imageCount := 0
 
 	haveOutput := false
@@ -731,6 +735,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				}
 				itemJSON, _ = sjson.Set(itemJSON, "arguments", argsStr)
 				appendOutput(itemJSON)
+				haveFunctionCall = true
 				return true
 			}
 			return true
@@ -779,5 +784,5 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		}
 	}
 
-	return resp
+	return finishGeminiResponse(modelName, root, resp, haveMessage || haveFunctionCall || imageCount > 0)
 }

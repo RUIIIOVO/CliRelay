@@ -393,11 +393,16 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 					}
 				}
 
-				segments := sdktranslator.TranslateStream(respCtx, to, execCtx.SourceFormat, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
-				for i := range segments {
-					out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
+				// Only a clean end of stream is passed on as [DONE]; see the
+				// antigravity executor.
+				errScan := scanner.Err()
+				if errScan == nil {
+					segments := sdktranslator.TranslateStream(respCtx, to, execCtx.SourceFormat, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
+					for i := range segments {
+						out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
+					}
 				}
-				if errScan := scanner.Err(); errScan != nil {
+				if errScan != nil {
 					recorder.RecordResponseError(errScan)
 					reporter.publishFailure(execCtx.Context)
 					out <- cliproxyexecutor.StreamChunk{Err: errScan}
