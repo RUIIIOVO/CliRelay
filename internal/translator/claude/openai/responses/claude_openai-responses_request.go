@@ -185,9 +185,15 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							if t := part.Get("text"); t.Exists() {
 								txt := t.String()
 								textAggregate.WriteString(txt)
-								contentPart := `{"type":"text","text":""}`
-								contentPart, _ = sjson.Set(contentPart, "text", txt)
-								partsJSON = append(partsJSON, contentPart)
+								// Anthropic rejects an empty text block ("text content
+								// blocks must be non-empty"). Clients send one next to
+								// an image when the user attaches an image without
+								// typing anything.
+								if txt != "" {
+									contentPart := `{"type":"text","text":""}`
+									contentPart, _ = sjson.Set(contentPart, "text", txt)
+									partsJSON = append(partsJSON, contentPart)
+								}
 							}
 							if ptype == "input_text" {
 								role = "user"
